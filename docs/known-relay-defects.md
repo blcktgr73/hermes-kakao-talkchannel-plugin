@@ -8,15 +8,17 @@
 코드에서는 `AS-IS (D<n>)` 주석으로 표시되어 있고, 각 항목은 테스트로 현재 동작이
 고정되어 있습니다. 고칠 때는 테스트도 함께 바꿔야 합니다.
 
-| ID | 요약 | 위치 | 영향 |
-|---|---|---|---|
-| D1 | `/health`만 트레일링 슬래시 정규화를 안 해 `//health` 요청 | `transport/client.py` `health_check` | 낮음 (릴레이가 관대하면 무해) |
-| D2 | 300초 타임아웃이 정상 연결도 끊음 | `transport/sse.py` `connect_sse` | 중간 |
-| D3 | 지터가 상한 적용 *후* 더해져 최대 20% 초과 | `transport/sse.py` `calculate_reconnect_delay` | 낮음 |
-| D4 | `ping` 이벤트 미처리, 유휴 워치독 없음 | `transport/sse.py` `_read_stream` | 중간 |
-| D5 | 멀티라인 `data:` 중 마지막 줄만 사용 | `transport/sse.py` `parse_sse_chunk` | 미지 |
-| D6 | 세션/콜백 호출에 명시적 타임아웃 없음 | `transport/session.py`, `kakao/callback.py` | 낮음 |
-| D7 | 릴레이 응답 경로에 `openclaw`가 하드코딩 | `transport/client.py` `send_reply` | 명명 문제 |
+| ID | 이슈 | 요약 | 위치 | 영향 |
+|---|---|---|---|---|
+| D1 | [#1](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/1) | `/health`만 트레일링 슬래시 정규화를 안 해 `//health` 요청 | `transport/client.py` `health_check` | 낮음 (릴레이가 관대하면 무해) |
+| D2 | [#2](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/2) | 300초 타임아웃이 정상 연결도 끊음 | `transport/sse.py` `connect_sse` | 중간 |
+| D3 | [#3](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/3) | 지터가 상한 적용 *후* 더해져 최대 20% 초과 | `transport/sse.py` `calculate_reconnect_delay` | 낮음 |
+| D4 | [#4](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/4) | `ping` 이벤트 미처리, 유휴 워치독 없음 | `transport/sse.py` `_read_stream` | 중간 |
+| D5 | [#5](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/5) | 멀티라인 `data:` 중 마지막 줄만 사용 | `transport/sse.py` `parse_sse_chunk` | 미지 |
+| D6 | [#6](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/6) | 세션/콜백 호출에 명시적 타임아웃 없음 | `transport/session.py`, `kakao/callback.py` | 낮음 |
+| D7 | [#7](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/7) | 릴레이 응답 경로에 `openclaw`가 하드코딩 | `transport/client.py` `send_reply` | 명명 문제 |
+
+관련: [#8 실제 Hermes 설치본으로 엔드투엔드 검증 필요](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/8)
 
 ---
 
