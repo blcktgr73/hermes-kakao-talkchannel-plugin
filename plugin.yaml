@@ -1,0 +1,53 @@
+name: kakao-talkchannel
+label: KakaoTalk
+kind: platform
+version: 0.1.0
+description: >
+  KakaoTalk Channel (카카오톡 채널) gateway adapter for Hermes Agent.
+  Inbound messages arrive over an SSE relay; replies are pushed back through
+  the relay's reply endpoint. Ported from openclaw-kakao-talkchannel-plugin.
+author: Seung-Bum Lee
+
+requires_env:
+  - name: KAKAO_RELAY_URL
+    description: >
+      Relay base URL. Defaults to https://k.tess.dev/ — a THIRD-PARTY relay whose
+      operator can read your KakaoTalk conversations in plaintext. Point this at
+      your own relay for anything sensitive. See docs/relay-trust-boundary.md.
+    prompt: "Relay base URL"
+    url: "https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/blob/main/docs/relay-trust-boundary.md"
+    password: false
+
+optional_env:
+  - name: KAKAO_RELAY_TOKEN
+    description: "Long-lived relay bearer token. Omit to use interactive pairing instead."
+    prompt: "Relay token (blank = pair interactively)"
+    password: true
+  - name: KAKAO_SESSION_TOKEN
+    description: "Relay session token. Normally written automatically after pairing."
+    prompt: "Relay session token"
+    password: true
+  - name: KAKAO_ALLOWED_USERS
+    description: "Comma-separated KakaoTalk botUserKey values allowed to DM the bot."
+    prompt: "Allowed user IDs (comma-separated)"
+    password: false
+  - name: KAKAO_ALLOW_ALL_USERS
+    description: "Set to 1/true to bypass the allowlist. Development only."
+    prompt: "Allow all users? (dev only)"
+    password: false
+  - name: KAKAO_HOME_CHANNEL
+    description: "Default botUserKey for cron/proactive delivery."
+    prompt: "Home channel (botUserKey)"
+    password: false
+  - name: KAKAO_RESPONSE_PREFIX
+    description: "String prepended to every outbound reply."
+    prompt: "Response prefix"
+    password: false
+  - name: KAKAO_TEXT_CHUNK_LIMIT
+    description: "Characters per outbound chunk (100-1000, default 400)."
+    prompt: "Text chunk limit"
+    password: false
+  - name: KAKAO_CHUNK_MODE
+    description: "How to split long replies: sentence | newline | length (default sentence)."
+    prompt: "Chunk mode"
+    password: false

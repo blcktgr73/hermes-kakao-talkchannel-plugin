@@ -93,6 +93,7 @@ LINE 어댑터가 청사진입니다 (P0-1).
 | Q5 | 릴레이의 `POST {relay}openclaw/reply` 경로명을 호스트 중립으로 바꿀 수 있나? | 3 |
 | Q6 | 다중 카카오 채널 요구가 실제로 있나? 있다면 프로필 분리로 충분한가? | 설계 재검토 |
 | Q7 | 라이선스·저장소 공개 범위 (Hermes는 MIT) | 7 |
+| Q8 | `BasePlatformAdapter`의 실제 import 경로와 `setup_fn` 시그니처 — 실제 Hermes 설치본으로 확인 필요 | 4 (엔드투엔드) |
 
 ## 명시적 비목표 (v1)
 
