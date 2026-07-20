@@ -122,6 +122,8 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
         # lost (observed 2026-07-20 — `ping 02` and `ping 03` in the same
         # second, both answers failing with "Kakao callback failed").
         self._pending_message_ids: dict[str, deque[tuple[str, float]]] = defaultdict(deque)
+        #: Monotonic counter so the log shows how many sends one turn produced.
+        self._send_seq = 0
 
         self._account_id = self.kakao_config.channel_id or "default"
         # Supervisor state for re-issuing a pairing code without restarting the
@@ -346,8 +348,23 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
         metadata: dict[str, Any] | None = None,
     ) -> Any:
         """Push a reply back through the relay."""
+        # Deliberately INFO, not DEBUG. KakaoTalk allows one reply per inbound
+        # message, so "how many times did the core call send for one turn, and
+        # with what" is the single most important thing to be able to see. It
+        # is not answerable from the gateway's own logs.
+        preview = (content or "").replace("\n", " ")[:60]
+        logger.info(
+            "[kakao] send #%d chat=%s len=%d reply_to=%s preview=%r",
+            self._send_seq,
+            chat_id,
+            len(content or ""),
+            reply_to,
+            preview,
+        )
+        self._send_seq += 1
+
         if self._is_transient_ack(content):
-            logger.debug("[kakao] Dropping transient status notice to preserve the callback")
+            logger.info("[kakao] send dropped: transient status notice")
             return SendResult(success=True)
 
         if not self._relay_token:
