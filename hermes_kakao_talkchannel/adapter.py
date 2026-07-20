@@ -20,7 +20,13 @@ from dataclasses import replace
 from typing import Any
 
 from .config import PLATFORM_NAME, KakaoConfig, load_config
-from .hermes_compat import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from .hermes_compat import (
+    BasePlatformAdapter,
+    MessageEvent,
+    MessageType,
+    Platform,
+    SendResult,
+)
 from .kakao.markdown import strip_markdown
 from .kakao.response import build_simple_text_response
 from .pairing.publisher import PairingPublisher
@@ -53,6 +59,15 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
     """Bridges the KakaoTalk relay stream to the Hermes gateway."""
 
     def __init__(self, config: Any, platform: Any = None) -> None:
+        # The adapter builds its own Platform value, matching the bundled LINE
+        # adapter. `Platform._missing_` mints a pseudo-member for any name the
+        # registry already knows, so this only works *after* register_platform
+        # has run — which is the real ordering, since the registry constructs
+        # adapters. If it raises, the registration order is wrong and we want
+        # to hear about it rather than silently run without a platform.
+        if platform is None and Platform is not None:
+            platform = Platform(PLATFORM_NAME)
+
         super().__init__(config, platform)
 
         extra = getattr(config, "extra", None) or {}
@@ -356,6 +371,15 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
             return kakao_override
 
         return build_simple_text_response(text)
+
+    async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
+        """Chat metadata for the agent. Abstract on the real base class.
+
+        A KakaoTalk Channel conversation is always 1:1 and the relay gives us
+        no display name — the botUserKey is all there is. Best effort, matching
+        how the bundled LINE adapter answers this.
+        """
+        return {"name": chat_id or "", "type": "dm"}
 
     # -- health ------------------------------------------------------------
 

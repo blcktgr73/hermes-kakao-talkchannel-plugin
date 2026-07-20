@@ -263,6 +263,33 @@ async def test_session_invalidation_clears_the_token(adapter: KakaoAdapter) -> N
     assert adapter.kakao_config.session_token is None
 
 
+async def test_get_chat_info_reports_a_dm(adapter: KakaoAdapter) -> None:
+    # Abstract on the real base class (verified against hermes-agent 0.18.2).
+    # A KakaoTalk Channel conversation is always 1:1.
+    info = await adapter.get_chat_info("botuserkey-abc123")
+    assert info == {"name": "botuserkey-abc123", "type": "dm"}
+
+
+async def test_get_chat_info_tolerates_a_blank_chat_id(adapter: KakaoAdapter) -> None:
+    assert await adapter.get_chat_info("") == {"name": "", "type": "dm"}
+
+
+def test_adapter_implements_every_abstract_method() -> None:
+    """Guards the failure that shipped: a missing abstract method.
+
+    `get_chat_info` was abstract on the real base class but the local stub was
+    a plain class, so the omission passed every test here and would have
+    failed at adapter construction on a real gateway. The stub is now an ABC;
+    this test states the invariant directly so the reason survives.
+    """
+    from hermes_kakao_talkchannel.hermes_compat import BasePlatformAdapter
+
+    required = set(getattr(BasePlatformAdapter, "__abstractmethods__", ()))
+    missing = {name for name in required if getattr(KakaoAdapter, name, None) is None}
+    assert not missing, f"KakaoAdapter does not implement: {sorted(missing)}"
+    assert not getattr(KakaoAdapter, "__abstractmethods__", ())
+
+
 def test_unused_import_guard() -> None:
     # client_module is imported to keep the relay client's import path exercised
     # even when every send is monkeypatched.

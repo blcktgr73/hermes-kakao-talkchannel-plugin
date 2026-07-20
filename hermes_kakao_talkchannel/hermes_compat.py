@@ -20,16 +20,20 @@ claiming the adapter works end to end.
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+#: Verified against hermes-agent 0.18.2 on 2026-07-20: the real module is the
+#: **top-level** ``gateway`` package, not one namespaced under ``hermes_agent``.
+#: The other two are kept as fallbacks in case that changes.
 _CANDIDATE_MODULES = (
+    "gateway.platforms.base",
     "hermes_agent.gateway.platforms.base",
     "hermes.gateway.platforms.base",
-    "gateway.platforms.base",
 )
 
 HERMES_AVAILABLE = False
@@ -135,10 +139,36 @@ class _StubSendResult:
     retry_after: float | None = None
 
 
-class _StubBasePlatformAdapter:
-    """Minimal stand-in mirroring the parts of the real base class we rely on."""
+class _StubBasePlatformAdapter(ABC):
+    """Minimal stand-in mirroring the parts of the real base class we rely on.
+
+    Deliberately an ABC declaring the **same abstract set as the real class**
+    (verified against hermes-agent 0.18.2: connect, disconnect, send,
+    get_chat_info). An earlier version was a plain class, so a missing
+    ``get_chat_info`` passed every test here and would have failed at adapter
+    construction on a real gateway. A stub that is laxer than the thing it
+    stands in for does not stand in for it.
+    """
 
     REQUIRES_EDIT_FINALIZE = False
+
+    @abstractmethod
+    async def connect(self, *, is_reconnect: bool = False) -> bool: ...
+
+    @abstractmethod
+    async def disconnect(self) -> None: ...
+
+    @abstractmethod
+    async def send(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Any: ...
+
+    @abstractmethod
+    async def get_chat_info(self, chat_id: str) -> dict[str, Any]: ...
 
     def __init__(self, config: Any, platform: Any = None) -> None:
         self.config = config
