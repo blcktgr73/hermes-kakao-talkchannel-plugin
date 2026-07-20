@@ -16,6 +16,7 @@ import contextlib
 import logging
 import os
 import time
+from collections import defaultdict, deque
 from dataclasses import replace
 from typing import Any
 
@@ -67,6 +68,10 @@ logger = logging.getLogger(__name__)
 #: Spending that one callback on "I'll respond shortly" instead of the response
 #: is the wrong trade on this platform, so these are dropped. Set
 #: ``KAKAO_SEND_STATUS_NOTICES=1`` to send them anyway.
+#: How long a Kakao callback URL stays usable. The relay documents 55s; a
+#: little margin keeps us from claiming an id that is about to die mid-flight.
+CALLBACK_TTL_SECONDS = 50.0
+
 _TRANSIENT_ACK_PREFIXES = (
     "⚡ Interrupting current task",
     "⏳ Queued for the next turn",
@@ -108,7 +113,15 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
         self._pairing_code: str | None = None
         # message id of the last inbound message per chat, so `send` knows which
         # relay message a reply belongs to.
-        self._last_message_id: dict[str, str] = {}
+        # Unused inbound message ids per chat, oldest first.
+        #
+        # Each inbound message carries exactly one single-use Kakao callback, so
+        # a message id may back at most one reply. An earlier version kept a
+        # single "last id" per chat: two messages arriving before the first
+        # answer overwrote it, so one reply targeted a spent callback and was
+        # lost (observed 2026-07-20 — `ping 02` and `ping 03` in the same
+        # second, both answers failing with "Kakao callback failed").
+        self._pending_message_ids: dict[str, deque[tuple[str, float]]] = defaultdict(deque)
 
         self._account_id = self.kakao_config.channel_id or "default"
         # Supervisor state for re-issuing a pairing code without restarting the
@@ -286,7 +299,7 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
             logger.info("[kakao] Ignoring message from unauthorized user %s", user_id)
             return
 
-        self._last_message_id[user_id] = message.id
+        self._pending_message_ids[user_id].append((message.id, time.time()))
 
         source = self.build_source(
             chat_id=user_id,
@@ -344,11 +357,15 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
                 retryable=True,
             )
 
-        message_id = reply_to or self._last_message_id.get(chat_id)
+        message_id = reply_to or self._take_message_id(chat_id)
         if not message_id:
             return SendResult(
                 success=False,
-                error=f"No inbound relay message to reply to for chat {chat_id}",
+                error=(
+                    f"No unused inbound message to reply to for chat {chat_id}. "
+                    "Every KakaoTalk callback is single use, so a reply needs its "
+                    "own inbound message and one may already have expired."
+                ),
                 retryable=False,
             )
 
@@ -396,6 +413,28 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
             return kakao_override
 
         return build_simple_text_response(text)
+
+    def _take_message_id(self, chat_id: str) -> str | None:
+        """Claim the oldest unused inbound message id for this chat.
+
+        Consuming rather than peeking is the point: a Kakao callback works once,
+        so two replies must never target the same inbound message. Entries older
+        than the callback TTL are dropped first — their callbacks are already
+        dead and using one would fail with "Callback URL expired".
+        """
+        pending = self._pending_message_ids.get(chat_id)
+        if not pending:
+            return None
+
+        cutoff = time.time() - CALLBACK_TTL_SECONDS
+        while pending and pending[0][1] < cutoff:
+            expired_id, _ = pending.popleft()
+            logger.debug("[kakao] Dropping expired callback for message %s", expired_id)
+
+        if not pending:
+            return None
+        message_id, _ = pending.popleft()
+        return message_id
 
     @staticmethod
     def _is_transient_ack(content: str) -> bool:

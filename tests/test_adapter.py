@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -58,7 +59,9 @@ async def test_inbound_message_records_the_reply_target(
     adapter: KakaoAdapter, captured_events: list[Any]
 ) -> None:
     await adapter._on_inbound_message(InboundMessage.from_wire(inbound_wire()))
-    assert adapter._last_message_id["botuserkey-abc123"] == "msg-0001"
+
+    pending = adapter._pending_message_ids["botuserkey-abc123"]
+    assert [message_id for message_id, _ in pending] == ["msg-0001"]
 
 
 async def test_message_without_a_user_id_is_dropped(
@@ -136,7 +139,7 @@ async def test_send_posts_a_simple_text_response(
 
     monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", fake_send_reply)
 
-    adapter._last_message_id["botuserkey-abc123"] = "msg-0001"
+    adapter._pending_message_ids["botuserkey-abc123"].append(("msg-0001", time.time()))
     result = await adapter.send("botuserkey-abc123", "안녕")
 
     assert result.success is True
@@ -158,7 +161,7 @@ async def test_send_strips_markdown(
 
     monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", fake_send_reply)
 
-    adapter._last_message_id["u"] = "m"
+    adapter._pending_message_ids["u"].append(("m", time.time()))
     await adapter.send("u", "**굵게** 그리고 `코드`")
 
     assert sent[0]["template"]["outputs"][0]["simpleText"]["text"] == "굵게 그리고 코드"
@@ -176,7 +179,7 @@ async def test_send_applies_the_response_prefix(
     monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", fake_send_reply)
 
     adapter.kakao_config.response_prefix = "[봇] "
-    adapter._last_message_id["u"] = "m"
+    adapter._pending_message_ids["u"].append(("m", time.time()))
     await adapter.send("u", "안녕")
 
     assert sent[0]["template"]["outputs"][0]["simpleText"]["text"] == "[봇] 안녕"
@@ -197,7 +200,7 @@ async def test_channel_data_override_replaces_the_whole_response(
         "version": "2.0",
         "template": {"outputs": [{"textCard": {"title": "카드"}}]},
     }
-    adapter._last_message_id["u"] = "m"
+    adapter._pending_message_ids["u"].append(("m", time.time()))
     await adapter.send("u", "무시됨", metadata={"channel_data": {"kakao": override}})
 
     assert sent[0] == override
@@ -211,7 +214,7 @@ async def test_auth_errors_are_reported_as_non_retryable(
 
     monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", failing_send_reply)
 
-    adapter._last_message_id["u"] = "m"
+    adapter._pending_message_ids["u"].append(("m", time.time()))
     result = await adapter.send("u", "안녕")
 
     assert result.success is False
@@ -226,7 +229,7 @@ async def test_server_errors_are_reported_as_retryable(
 
     monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", failing_send_reply)
 
-    adapter._last_message_id["u"] = "m"
+    adapter._pending_message_ids["u"].append(("m", time.time()))
     result = await adapter.send("u", "안녕")
 
     assert result.success is False
@@ -263,6 +266,123 @@ async def test_session_invalidation_clears_the_token(adapter: KakaoAdapter) -> N
     assert adapter.kakao_config.session_token is None
 
 
+class TestCallbackIsSingleUse:
+    """Each inbound message backs exactly one reply.
+
+    Observed on a live gateway 2026-07-20: `ping 02` and `ping 03` arrived in
+    the same second, the adapter kept only a single "last message id" per chat,
+    and both answers targeted the same callback. One was delivered against a
+    spent callback and lost — "Kakao callback failed", then "Callback URL
+    expired or not available".
+    """
+
+    @staticmethod
+    def _recorder(sent: list[str]):
+        async def fake_send_reply(config: Any, message_id: str, response: Any) -> Any:
+            sent.append(message_id)
+            return SendReplyResponse(success=True)
+
+        return fake_send_reply
+
+    async def test_two_inbound_messages_get_two_distinct_callbacks(
+        self, adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[str] = []
+        monkeypatch.setattr(
+            "hermes_kakao_talkchannel.adapter.send_reply", self._recorder(sent)
+        )
+
+        now = time.time()
+        adapter._pending_message_ids["u"].extend([("m1", now), ("m2", now)])
+
+        await adapter.send("u", "pong 02")
+        await adapter.send("u", "pong 03")
+
+        # Oldest first, and never the same id twice.
+        assert sent == ["m1", "m2"]
+
+    async def test_a_message_id_is_never_reused(
+        self, adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[str] = []
+        monkeypatch.setattr(
+            "hermes_kakao_talkchannel.adapter.send_reply", self._recorder(sent)
+        )
+
+        adapter._pending_message_ids["u"].append(("m1", time.time()))
+
+        first = await adapter.send("u", "first")
+        second = await adapter.send("u", "second")
+
+        assert first.success is True
+        assert sent == ["m1"]
+        # The second reply has no callback of its own and must not steal one.
+        assert second.success is False
+        assert second.retryable is False
+
+    async def test_expired_ids_are_skipped(
+        self, adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[str] = []
+        monkeypatch.setattr(
+            "hermes_kakao_talkchannel.adapter.send_reply", self._recorder(sent)
+        )
+
+        stale = time.time() - 120
+        adapter._pending_message_ids["u"].extend([("old", stale), ("fresh", time.time())])
+
+        await adapter.send("u", "answer")
+
+        # Using the dead one would fail with "Callback URL expired".
+        assert sent == ["fresh"]
+
+    async def test_all_expired_reports_failure(
+        self, adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[str] = []
+        monkeypatch.setattr(
+            "hermes_kakao_talkchannel.adapter.send_reply", self._recorder(sent)
+        )
+
+        adapter._pending_message_ids["u"].append(("old", time.time() - 120))
+
+        result = await adapter.send("u", "answer")
+
+        assert result.success is False
+        assert sent == []
+
+    async def test_reply_to_takes_precedence(
+        self, adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[str] = []
+        monkeypatch.setattr(
+            "hermes_kakao_talkchannel.adapter.send_reply", self._recorder(sent)
+        )
+
+        adapter._pending_message_ids["u"].append(("queued", time.time()))
+
+        await adapter.send("u", "answer", reply_to="explicit")
+
+        assert sent == ["explicit"]
+        # The queued id is untouched and still available.
+        assert len(adapter._pending_message_ids["u"]) == 1
+
+    async def test_a_suppressed_notice_does_not_consume_an_id(
+        self, adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[str] = []
+        monkeypatch.setattr(
+            "hermes_kakao_talkchannel.adapter.send_reply", self._recorder(sent)
+        )
+
+        adapter._pending_message_ids["u"].append(("m1", time.time()))
+
+        await adapter.send("u", "⚡ Interrupting current task. I'll respond shortly.")
+        await adapter.send("u", "the real answer")
+
+        assert sent == ["m1"]
+
+
 class TestTransientAckSuppression:
     """KakaoTalk gives one single-use callback per inbound message.
 
@@ -293,7 +413,7 @@ class TestTransientAckSuppression:
             return SendReplyResponse(success=True)
 
         monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", fake_send_reply)
-        adapter._last_message_id["u"] = "m"
+        adapter._pending_message_ids["u"].append(("m", time.time()))
 
         result = await adapter.send("u", content)
 
@@ -311,7 +431,7 @@ class TestTransientAckSuppression:
             return SendReplyResponse(success=True)
 
         monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", fake_send_reply)
-        adapter._last_message_id["u"] = "m"
+        adapter._pending_message_ids["u"].append(("m", time.time()))
 
         await adapter.send("u", "pong 01")
 
@@ -328,7 +448,7 @@ class TestTransientAckSuppression:
             return SendReplyResponse(success=True)
 
         monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", fake_send_reply)
-        adapter._last_message_id["u"] = "m"
+        adapter._pending_message_ids["u"].append(("m", time.time()))
 
         await adapter.send("u", "The bot said ⚡ Interrupting current task earlier.")
 
@@ -345,7 +465,7 @@ class TestTransientAckSuppression:
 
         monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", fake_send_reply)
         monkeypatch.setenv("KAKAO_SEND_STATUS_NOTICES", "1")
-        adapter._last_message_id["u"] = "m"
+        adapter._pending_message_ids["u"].append(("m", time.time()))
 
         await adapter.send("u", "⚡ Interrupting current task. I'll respond shortly.")
 
