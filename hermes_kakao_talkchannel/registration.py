@@ -51,10 +51,39 @@ def validate_config(config: Any) -> Any:
     return result.errors
 
 
-def is_connected(adapter: Any = None) -> bool:
-    if adapter is None:
+def _has_explicit_opt_in(extra: dict[str, Any]) -> bool:
+    """Whether the operator has actually asked for the KakaoTalk channel.
+
+    Deliberately *not* satisfied by defaults. ``relay_url`` always has a value,
+    so treating its presence as configuration would auto-enable this channel on
+    every install that merely has the plugin — and the default relay is a
+    third party that sees message plaintext. Enabling that implicitly would be
+    wrong, so an explicit signal is required.
+    """
+    if os.environ.get("KAKAO_RELAY_URL"):
+        return True
+    for env_name in ("KAKAO_RELAY_TOKEN", "KAKAO_SESSION_TOKEN", "KAKAO_CHANNEL_ID"):
+        if os.environ.get(env_name):
+            return True
+    return any(
+        extra.get(key)
+        for key in ("relay_url", "relayUrl", "relay_token", "relayToken", "channel_id", "channelId")
+    )
+
+
+def is_connected(config: Any = None) -> bool:
+    """Whether KakaoTalk would be configured if it were enabled.
+
+    Receives a ``PlatformConfig``, not an adapter — the gateway calls this
+    during config load to decide whether to auto-enable the platform
+    (``gateway/config.py``: *"we're asking 'would this plugin BE configured if
+    we enabled it?'"*). An earlier version took an adapter and read
+    ``_connected``, so it returned False for every config and the platform
+    could never enable.
+    """
+    if config is None:
         return False
-    return bool(getattr(adapter, "_connected", False))
+    return _has_explicit_opt_in(getattr(config, "extra", None) or {})
 
 
 def env_enablement() -> dict[str, Any] | None:
@@ -62,7 +91,14 @@ def env_enablement() -> dict[str, Any] | None:
 
     Lets ``hermes status`` report the channel without importing aiohttp or
     touching the relay.
+
+    Returns None when nothing is configured, matching the bundled LINE and IRC
+    plugins. An earlier version always returned a dict, which claimed an
+    env-only setup existed even when no KakaoTalk variable was set.
     """
+    if not _has_explicit_opt_in({}):
+        return None
+
     config: KakaoConfig = load_config({})
 
     extra: dict[str, Any] = {
