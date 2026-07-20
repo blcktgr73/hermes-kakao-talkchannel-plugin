@@ -116,7 +116,10 @@ def format_snapshot(snapshot: PairingSnapshot | None) -> str:
     elif snapshot.state == "paired":
         suffix = f" ({snapshot.paired_user_id})" if snapshot.paired_user_id else ""
         lines.append(f"  state: paired{suffix}")
-        lines.append("  A new code is not needed. Use `pairing new` to force one.")
+        lines.append("  A new code is not needed. To re-pair:")
+        lines.append("    1. hermes kakao pairing new")
+        lines.append("    2. send /unpair in KakaoTalk  ← the relay requires this")
+        lines.append("    3. send /pair <code>")
     elif snapshot.state == "expired":
         lines.append("  state: expired — the last code is no longer valid.")
         lines.append("  Run: hermes kakao pairing new")
@@ -246,7 +249,14 @@ def setup_parser(parser: argparse.ArgumentParser) -> None:
     status.add_argument("--account", help="Account id (defaults to the only running account)")
     status.add_argument("--json", action="store_true", help="Emit raw JSON")
 
-    new = actions.add_parser("new", help="Drop the current session and issue a fresh code")
+    new = actions.add_parser(
+        "new",
+        help=(
+            "Drop the current session and issue a fresh code. "
+            "Send /unpair in KakaoTalk before /pair — the relay rejects a "
+            "second /pair on a conversation that is still paired."
+        ),
+    )
     new.add_argument("--account", help="Account id (defaults to the only running account)")
     new.add_argument("--json", action="store_true", help="Emit raw JSON")
     new.add_argument(

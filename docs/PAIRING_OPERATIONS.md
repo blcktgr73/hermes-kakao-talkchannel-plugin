@@ -85,7 +85,29 @@ account: default (default)
 ```
 
 카카오톡 채널에 `/pair VZ4Q-3E8Q`를 입력한 뒤 다시 `status`로 확인하면 `state: paired`가
-됩니다. 이미 페어링되어 있는데 새로 받으려면 `hermes kakao pairing new`.
+됩니다.
+
+## 재페어링 — `/unpair`가 먼저입니다
+
+이미 연결된 상태에서 새 코드로 다시 붙이려면 **순서가 있습니다.**
+
+```bash
+hermes kakao pairing new          # 1. 새 코드 발급 (게이트웨이 재시작 없음)
+```
+```
+/unpair                            # 2. 카카오톡에서 기존 연결 해제
+/pair XXXX-XXXX                    # 3. 새 코드로 연결
+```
+
+**2번을 건너뛰면 3번이 거부됩니다.** 릴레이가 이미 페어링된 대화의 `/pair`를 막습니다
+(`internal/handler/kakao.go`):
+
+> 이미 OpenClaw에 연결되어 있습니다. 다른 봇에 연결하려면 먼저 `/unpair` 로 연결을 해제하세요.
+
+`pairing new`는 **게이트웨이 쪽 세션만** 버립니다. 릴레이의 `conversation_mappings`는
+카카오톡의 `/unpair`로만 풀리고, 플러그인에는 그걸 건드릴 경로가 없습니다.
+
+2026-07-20 실기 확인 절차입니다.
 
 ## 상태 파일이 오래됐을 때
 

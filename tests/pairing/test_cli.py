@@ -82,6 +82,14 @@ class TestFormatSnapshot:
         assert "CODE-1234" not in output
         assert "user-1" in output
 
+    def test_paired_state_spells_out_the_unpair_step(self) -> None:
+        # `pairing new` only drops the gateway-side session. The relay rejects a
+        # second /pair while the conversation is still paired, and nothing in
+        # the plugin can clear that — only /unpair in KakaoTalk can.
+        output = format_snapshot(snapshot(state="paired", pairing_code=None))
+        assert "/unpair" in output
+        assert output.index("/unpair") < output.index("/pair <code>")
+
     def test_handles_a_paired_account_with_no_user(self) -> None:
         # Happens when a saved session token was restored rather than paired.
         output = format_snapshot(snapshot(state="paired", pairing_code=None, paired_user_id=None))
