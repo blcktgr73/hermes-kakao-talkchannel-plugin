@@ -44,11 +44,28 @@ def check_requirements() -> bool:
     return True
 
 
-def validate_config(config: Any) -> Any:
-    """Validate resolved config. Returns a list of error strings (empty = ok)."""
+def validate_config(config: Any) -> bool:
+    """Whether the resolved config is usable. **Must return a bool.**
+
+    The registry tests it as ``if not entry.validate_config(config)`` and
+    refuses to build the adapter on a falsy result. An earlier version returned
+    a list of error strings, so the success case — an empty list — was falsy and
+    the platform failed validation precisely when it was valid:
+    ``Platform 'KakaoTalk' config validation failed``.
+
+    Errors are logged rather than returned, since the contract has no channel
+    for them.
+    """
     extra = getattr(config, "extra", None) or {}
     result = _validate_kakao_config(load_config(extra))
-    return result.errors
+
+    if not result.ok:
+        for error in result.errors:
+            logger.warning("[kakao] Invalid configuration: %s", error)
+        return False
+
+    # A valid-but-unconfigured account is not something to start.
+    return _has_explicit_opt_in(extra)
 
 
 def _has_explicit_opt_in(extra: dict[str, Any]) -> bool:

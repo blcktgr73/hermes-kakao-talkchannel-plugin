@@ -97,19 +97,30 @@ def test_is_connected_true_from_yaml_extra() -> None:
     assert is_connected(Cfg({"relay_url": "https://relay.example/"})) is True
 
 
-def test_validate_config_returns_no_errors_for_defaults() -> None:
-    class Cfg:
-        extra: dict[str, Any] = {}
+# The registry tests this as `if not entry.validate_config(config)` and refuses
+# to build the adapter on a falsy result. An earlier version returned a list of
+# error strings, so the success case — an empty list — was falsy and the
+# platform failed validation exactly when it was valid.
+def test_validate_config_returns_a_bool_not_a_list() -> None:
+    assert validate_config(Cfg({"relay_url": "https://relay.example/"})) is True
 
-    assert validate_config(Cfg()) == []
+
+def test_validate_config_false_when_unconfigured() -> None:
+    assert validate_config(Cfg()) is False
 
 
-def test_validate_config_surfaces_range_errors() -> None:
-    class Cfg:
-        extra = {"text_chunk_limit": 5}
+def test_validate_config_false_on_out_of_range_values() -> None:
+    assert (
+        validate_config(
+            Cfg({"relay_url": "https://relay.example/", "text_chunk_limit": 5})
+        )
+        is False
+    )
 
-    errors = validate_config(Cfg())
-    assert any("text_chunk_limit" in error for error in errors)
+
+def test_validate_config_true_from_env_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KAKAO_RELAY_URL", "https://relay.example/")
+    assert validate_config(Cfg()) is True
 
 
 def test_env_enablement_seeds_extra_from_the_environment(
