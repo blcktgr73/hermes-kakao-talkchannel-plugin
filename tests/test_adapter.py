@@ -217,17 +217,54 @@ async def test_flush_applies_the_response_prefix_once(
     assert text.count("[봇]") == 1
 
 
-async def test_too_many_bubbles_are_truncated_visibly(
+async def test_a_reply_that_overflows_expands_the_bubbles_before_truncating(
     adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Kakao allows 3 outputs and there is no second callback, so the overflow
-    # cannot be delivered at all. Say so rather than dropping it silently.
+    """400 is the visible length, not the capacity — 1000 is.
+
+    A reply of ~2000 characters does not fit in three 400-char bubbles but does
+    fit in three 1000-char ones. Truncating it would throw away half the answer
+    for no reason.
+    """
     sent = record_sends(monkeypatch)
-    adapter.kakao_config.text_chunk_limit = 100
     adapter.kakao_config.chunk_mode = "length"
     adapter._pending_message_ids["u"].append(("m", time.time()))
 
-    await adapter.send("u", "가" * 1000)
+    await adapter.send("u", "가" * 2000)
+    await adapter._flush("u")
+
+    rendered = bubbles(sent[0][1])
+    assert len(rendered) <= 3
+    assert "…(잘림)" not in rendered[-1]
+    assert sum(len(bubble) for bubble in rendered) == 2000
+
+
+async def test_short_replies_keep_the_smaller_visible_bubbles(
+    adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The expansion is a fallback, not the default: short answers should stay
+    # fully visible rather than collapsed.
+    sent = record_sends(monkeypatch)
+    adapter.kakao_config.chunk_mode = "length"
+    adapter._pending_message_ids["u"].append(("m", time.time()))
+
+    await adapter.send("u", "가" * 900)
+    await adapter._flush("u")
+
+    rendered = bubbles(sent[0][1])
+    assert all(len(bubble) <= adapter.kakao_config.text_chunk_limit for bubble in rendered)
+
+
+async def test_too_many_bubbles_are_truncated_visibly(
+    adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Past three 1000-character bubbles there is nowhere left to put the text —
+    # no second callback exists. Say so rather than dropping it silently.
+    sent = record_sends(monkeypatch)
+    adapter.kakao_config.chunk_mode = "length"
+    adapter._pending_message_ids["u"].append(("m", time.time()))
+
+    await adapter.send("u", "가" * 4000)
     await adapter._flush("u")
 
     rendered = bubbles(sent[0][1])

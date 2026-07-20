@@ -540,6 +540,16 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
             text, self.kakao_config.text_chunk_limit, self.kakao_config.chunk_mode
         )
 
+        # `text_chunk_limit` (400 by default) is how much KakaoTalk shows before
+        # collapsing a bubble, not how much one holds — the real cap is 1000.
+        # Preferring the smaller size keeps short answers fully visible, but
+        # there is no second callback, so when a reply would not fit in three
+        # bubbles the choice is a collapsed bubble or a lost paragraph.
+        if len(bubbles) > KakaoLimits.OUTPUTS_MAX:
+            bubbles = chunk_text_for_kakao(
+                text, KakaoLimits.SIMPLE_TEXT_MAX, self.kakao_config.chunk_mode
+            )
+
         if len(bubbles) > KakaoLimits.OUTPUTS_MAX:
             dropped = len(bubbles) - KakaoLimits.OUTPUTS_MAX
             logger.warning(
@@ -549,7 +559,12 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
                 dropped,
             )
             bubbles = bubbles[: KakaoLimits.OUTPUTS_MAX]
-            bubbles[-1] = f"{bubbles[-1]}\n\n…(잘림)"
+            # Make room first. Appending and then clamping to the bubble limit
+            # cuts the marker off again, precisely in the case it exists for.
+            marker = "\n\n…(잘림)"
+            bubbles[-1] = (
+                bubbles[-1][: KakaoLimits.SIMPLE_TEXT_MAX - len(marker)] + marker
+            )
 
         return build_multi_text_response(
             [bubble[: KakaoLimits.SIMPLE_TEXT_MAX] for bubble in bubbles]
