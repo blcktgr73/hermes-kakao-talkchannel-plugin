@@ -120,17 +120,8 @@ async def test_send_fails_before_the_token_is_resolved(adapter: KakaoAdapter) ->
     assert "not resolved" in result.error
 
 
-async def test_send_fails_without_an_inbound_message_to_reply_to(
-    adapter: KakaoAdapter,
-) -> None:
-    result = await adapter.send("unknown-user", "안녕")
-    assert result.success is False
-    assert result.retryable is False
-
-
-async def test_send_posts_a_simple_text_response(
-    adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def record_sends(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, Any]]]:
+    """Capture what actually reaches the relay."""
     sent: list[tuple[str, dict[str, Any]]] = []
 
     async def fake_send_reply(config: Any, message_id: str, response: dict[str, Any]) -> Any:
@@ -138,11 +129,40 @@ async def test_send_posts_a_simple_text_response(
         return SendReplyResponse(success=True)
 
     monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", fake_send_reply)
+    return sent
 
-    adapter._pending_message_ids["botuserkey-abc123"].append(("msg-0001", time.time()))
-    result = await adapter.send("botuserkey-abc123", "안녕")
+
+def bubbles(response: dict[str, Any]) -> list[str]:
+    return [out["simpleText"]["text"] for out in response["template"]["outputs"]]
+
+
+# `send` buffers; `_flush` delivers. Hermes calls send once per block of a turn
+# and KakaoTalk answers one inbound message with one response, so the blocks are
+# combined instead of racing for a callback that only works once.
+
+
+async def test_send_buffers_rather_than_delivering(
+    adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent = record_sends(monkeypatch)
+    adapter._pending_message_ids["u"].append(("m", time.time()))
+
+    result = await adapter.send("u", "안녕")
 
     assert result.success is True
+    assert sent == []
+    assert adapter._outbox["u"].chunks == ["안녕"]
+
+
+async def test_flush_posts_a_simple_text_response(
+    adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent = record_sends(monkeypatch)
+    adapter._pending_message_ids["botuserkey-abc123"].append(("msg-0001", time.time()))
+
+    await adapter.send("botuserkey-abc123", "안녕")
+    await adapter._flush("botuserkey-abc123")
+
     assert sent[0][0] == "msg-0001"
     assert sent[0][1] == {
         "version": "2.0",
@@ -150,90 +170,111 @@ async def test_send_posts_a_simple_text_response(
     }
 
 
-async def test_send_strips_markdown(
+async def test_several_blocks_become_one_response(
     adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    sent: list[dict[str, Any]] = []
-
-    async def fake_send_reply(config: Any, message_id: str, response: dict[str, Any]) -> Any:
-        sent.append(response)
-        return SendReplyResponse(success=True)
-
-    monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", fake_send_reply)
-
+    # The whole point: one inbound, one callback, one delivery.
+    sent = record_sends(monkeypatch)
     adapter._pending_message_ids["u"].append(("m", time.time()))
-    await adapter.send("u", "**굵게** 그리고 `코드`")
 
-    assert sent[0]["template"]["outputs"][0]["simpleText"]["text"] == "굵게 그리고 코드"
+    await adapter.send("u", "첫 문단")
+    await adapter.send("u", "둘째 문단")
+    await adapter.send("u", "셋째 문단")
+    await adapter._flush("u")
+
+    assert len(sent) == 1
+    assert "첫 문단" in bubbles(sent[0][1])[0]
+    assert "둘째 문단" in " ".join(bubbles(sent[0][1]))
+    assert "셋째 문단" in " ".join(bubbles(sent[0][1]))
 
 
-async def test_send_applies_the_response_prefix(
+async def test_flush_strips_markdown(
     adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    sent: list[dict[str, Any]] = []
+    sent = record_sends(monkeypatch)
+    adapter._pending_message_ids["u"].append(("m", time.time()))
 
-    async def fake_send_reply(config: Any, message_id: str, response: dict[str, Any]) -> Any:
-        sent.append(response)
-        return SendReplyResponse(success=True)
+    await adapter.send("u", "**굵게** 그리고 `코드`")
+    await adapter._flush("u")
 
-    monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", fake_send_reply)
+    assert bubbles(sent[0][1])[0] == "굵게 그리고 코드"
 
+
+async def test_flush_applies_the_response_prefix_once(
+    adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent = record_sends(monkeypatch)
     adapter.kakao_config.response_prefix = "[봇] "
     adapter._pending_message_ids["u"].append(("m", time.time()))
-    await adapter.send("u", "안녕")
 
-    assert sent[0]["template"]["outputs"][0]["simpleText"]["text"] == "[봇] 안녕"
+    await adapter.send("u", "안녕")
+    await adapter.send("u", "또 안녕")
+    await adapter._flush("u")
+
+    # Prefixing the combined reply, not every block.
+    text = " ".join(bubbles(sent[0][1]))
+    assert text.startswith("[봇] ")
+    assert text.count("[봇]") == 1
+
+
+async def test_too_many_bubbles_are_truncated_visibly(
+    adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Kakao allows 3 outputs and there is no second callback, so the overflow
+    # cannot be delivered at all. Say so rather than dropping it silently.
+    sent = record_sends(monkeypatch)
+    adapter.kakao_config.text_chunk_limit = 100
+    adapter.kakao_config.chunk_mode = "length"
+    adapter._pending_message_ids["u"].append(("m", time.time()))
+
+    await adapter.send("u", "가" * 1000)
+    await adapter._flush("u")
+
+    rendered = bubbles(sent[0][1])
+    assert len(rendered) == 3
+    assert rendered[-1].endswith("…(잘림)")
 
 
 async def test_channel_data_override_replaces_the_whole_response(
     adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    sent: list[dict[str, Any]] = []
-
-    async def fake_send_reply(config: Any, message_id: str, response: dict[str, Any]) -> Any:
-        sent.append(response)
-        return SendReplyResponse(success=True)
-
-    monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", fake_send_reply)
-
+    sent = record_sends(monkeypatch)
     override = {
         "version": "2.0",
         "template": {"outputs": [{"textCard": {"title": "카드"}}]},
     }
     adapter._pending_message_ids["u"].append(("m", time.time()))
+
     await adapter.send("u", "무시됨", metadata={"channel_data": {"kakao": override}})
+    await adapter._flush("u")
 
-    assert sent[0] == override
+    assert sent[0][1] == override
 
 
-async def test_auth_errors_are_reported_as_non_retryable(
+async def test_delivery_failure_is_logged_not_raised(
     adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The core has already been told the send succeeded; the only place left to
+    # report a failure is the log.
     async def failing_send_reply(config: Any, message_id: str, response: dict[str, Any]) -> Any:
         raise RelayHttpError(401, "Unauthorized", "token expired")
 
     monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", failing_send_reply)
-
     adapter._pending_message_ids["u"].append(("m", time.time()))
-    result = await adapter.send("u", "안녕")
 
-    assert result.success is False
-    assert result.retryable is False
+    await adapter.send("u", "안녕")
+    await adapter._flush("u")  # must not raise
 
 
-async def test_server_errors_are_reported_as_retryable(
+async def test_flush_without_a_callback_drops_the_reply(
     adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def failing_send_reply(config: Any, message_id: str, response: dict[str, Any]) -> Any:
-        raise RelayHttpError(503, "Service Unavailable", "down")
+    sent = record_sends(monkeypatch)
 
-    monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", failing_send_reply)
+    await adapter.send("nobody", "안녕")
+    await adapter._flush("nobody")
 
-    adapter._pending_message_ids["u"].append(("m", time.time()))
-    result = await adapter.send("u", "안녕")
-
-    assert result.success is False
-    assert result.retryable is True
+    assert sent == []
 
 
 # -- lifecycle -------------------------------------------------------------
@@ -296,7 +337,9 @@ class TestCallbackIsSingleUse:
         adapter._pending_message_ids["u"].extend([("m1", now), ("m2", now)])
 
         await adapter.send("u", "pong 02")
+        await adapter._flush("u")
         await adapter.send("u", "pong 03")
+        await adapter._flush("u")
 
         # Oldest first, and never the same id twice.
         assert sent == ["m1", "m2"]
@@ -311,14 +354,13 @@ class TestCallbackIsSingleUse:
 
         adapter._pending_message_ids["u"].append(("m1", time.time()))
 
-        first = await adapter.send("u", "first")
-        second = await adapter.send("u", "second")
+        await adapter.send("u", "first")
+        await adapter._flush("u")
+        await adapter.send("u", "second")
+        await adapter._flush("u")
 
-        assert first.success is True
-        assert sent == ["m1"]
         # The second reply has no callback of its own and must not steal one.
-        assert second.success is False
-        assert second.retryable is False
+        assert sent == ["m1"]
 
     async def test_expired_ids_are_skipped(
         self, adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
@@ -332,6 +374,7 @@ class TestCallbackIsSingleUse:
         adapter._pending_message_ids["u"].extend([("old", stale), ("fresh", time.time())])
 
         await adapter.send("u", "answer")
+        await adapter._flush("u")
 
         # Using the dead one would fail with "Callback URL expired".
         assert sent == ["fresh"]
@@ -346,9 +389,9 @@ class TestCallbackIsSingleUse:
 
         adapter._pending_message_ids["u"].append(("old", time.time() - 120))
 
-        result = await adapter.send("u", "answer")
+        await adapter.send("u", "answer")
+        await adapter._flush("u")
 
-        assert result.success is False
         assert sent == []
 
     async def test_reply_to_is_ignored_for_callback_selection(
@@ -370,6 +413,7 @@ class TestCallbackIsSingleUse:
         adapter._pending_message_ids["u"].append(("queued", time.time()))
 
         await adapter.send("u", "answer", reply_to="threading-hint")
+        await adapter._flush("u")
 
         assert sent == ["queued"]
         assert not adapter._pending_message_ids["u"]
@@ -386,12 +430,12 @@ class TestCallbackIsSingleUse:
 
         adapter._pending_message_ids["u"].append(("m1", time.time()))
 
-        results = [
-            await adapter.send("u", f"part {i}", reply_to="m1") for i in range(3)
-        ]
+        for i in range(3):
+            await adapter.send("u", f"part {i}", reply_to="m1")
+            await adapter._flush("u")
 
+        # One inbound backs one reply; the rest have no callback of their own.
         assert sent == ["m1"]
-        assert [r.success for r in results] == [True, False, False]
 
     async def test_a_suppressed_notice_does_not_consume_an_id(
         self, adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
@@ -405,6 +449,7 @@ class TestCallbackIsSingleUse:
 
         await adapter.send("u", "⚡ Interrupting current task. I'll respond shortly.")
         await adapter.send("u", "the real answer")
+        await adapter._flush("u")
 
         assert sent == ["m1"]
 
@@ -447,6 +492,7 @@ class TestTransientAckSuppression:
         adapter._pending_message_ids["u"].append(("m", time.time()))
 
         result = await adapter.send("u", content)
+        await adapter._flush("u")
 
         # Reported as delivered so the core does not retry, but nothing is sent.
         assert result.success is True
@@ -465,6 +511,7 @@ class TestTransientAckSuppression:
         adapter._pending_message_ids["u"].append(("m", time.time()))
 
         await adapter.send("u", "pong 01")
+        await adapter._flush("u")
 
         assert sent == ["m"]
 
@@ -482,6 +529,7 @@ class TestTransientAckSuppression:
         adapter._pending_message_ids["u"].append(("m", time.time()))
 
         await adapter.send("u", "The bot said ⚡ Interrupting current task earlier.")
+        await adapter._flush("u")
 
         assert sent == ["m"]
 
@@ -499,6 +547,7 @@ class TestTransientAckSuppression:
         adapter._pending_message_ids["u"].append(("m", time.time()))
 
         await adapter.send("u", "⚡ Interrupting current task. I'll respond shortly.")
+        await adapter._flush("u")
 
         assert sent == ["m"]
 

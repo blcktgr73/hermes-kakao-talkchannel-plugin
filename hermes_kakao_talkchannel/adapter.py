@@ -17,7 +17,7 @@ import logging
 import os
 import time
 from collections import defaultdict, deque
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .config import PLATFORM_NAME, KakaoConfig, load_config
@@ -28,8 +28,10 @@ from .hermes_compat import (
     Platform,
     SendResult,
 )
+from .kakao.chunking import chunk_text_for_kakao
+from .kakao.limits import KakaoLimits
 from .kakao.markdown import strip_markdown
-from .kakao.response import build_simple_text_response
+from .kakao.response import build_multi_text_response
 from .pairing.publisher import PairingPublisher
 from .pairing.registry import (
     PairingSnapshot,
@@ -71,6 +73,24 @@ logger = logging.getLogger(__name__)
 #: How long a Kakao callback URL stays usable. The relay documents 55s; a
 #: little margin keeps us from claiming an id that is about to die mid-flight.
 CALLBACK_TTL_SECONDS = 50.0
+
+#: Quiet period after the last block before the buffered reply is sent.
+OUTBOX_DEBOUNCE_SECONDS = 1.5
+
+#: Hard cap on buffering, measured from the first block of a turn. Waiting for
+#: a turn that keeps producing blocks would eventually outlive the callback and
+#: lose the whole reply, so send what we have instead.
+OUTBOX_MAX_WAIT_SECONDS = 8.0
+
+
+@dataclass
+class _Outbox:
+    """Blocks buffered for one chat, awaiting a single combined delivery."""
+
+    chunks: list[str] = field(default_factory=list)
+    override: dict[str, Any] | None = None
+    first_buffered_at: float = 0.0
+    flush_task: asyncio.Task[None] | None = None
 
 _TRANSIENT_ACK_PREFIXES = (
     "⚡ Interrupting current task",
@@ -132,6 +152,8 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
         self._pending_message_ids: dict[str, deque[tuple[str, float]]] = defaultdict(deque)
         #: Monotonic counter so the log shows how many sends one turn produced.
         self._send_seq = 0
+        #: Buffered outbound blocks per chat, flushed as one reply.
+        self._outbox: dict[str, _Outbox] = defaultdict(_Outbox)
 
         self._account_id = self.kakao_config.channel_id or "default"
         # Supervisor state for re-issuing a pairing code without restarting the
@@ -287,6 +309,10 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
         # The supervisor waits on the inner event, so it must be released too.
         self._inner_stop.set()
 
+        # Anything still buffered has a live callback right now and none after
+        # shutdown, so send it rather than losing it.
+        await self._flush_all()
+
         if self._stream_task and not self._stream_task.done():
             self._stream_task.cancel()
             # The task may fail on the way down; shutdown must still complete.
@@ -383,71 +409,149 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
                 retryable=True,
             )
 
-        # `reply_to` is deliberately ignored for callback selection.
-        #
-        # It is a *threading* hint — Hermes passes the originating message id
-        # per `reply_to_mode` (default "first") so platforms that thread can
-        # attach the reply. KakaoTalk has no threading, and its callbacks are
-        # single use, so honouring it meant every reply in a turn targeted the
-        # same already-spent callback. The relay log made this unambiguous:
-        # every failure carried one messageId and one cbtoken, retried until
-        # Kakao answered 400. The queue is the only correct source here.
+        # Buffer rather than deliver. Hermes calls send once per block of a
+        # turn; KakaoTalk answers one inbound message with one response. The
+        # flush combines the blocks into that single response.
+        outbox = self._outbox[chat_id]
+        if not outbox.chunks and outbox.override is None:
+            outbox.first_buffered_at = time.monotonic()
+
+        override = self._extract_override(metadata)
+        if override is not None:
+            # A structured card replaces prose — it is the whole response.
+            outbox.override = override
+        else:
+            text = strip_markdown(content)
+            if text:
+                outbox.chunks.append(text)
+
+        self._schedule_flush(chat_id)
+
+        # Optimistic: the real outcome is known only at flush time, and the
+        # core has no way to await it. Failures are logged there.
+        return SendResult(success=True)
+
+    def _schedule_flush(self, chat_id: str) -> None:
+        """(Re)arm the debounce for this chat.
+
+        Each new block pushes the flush out, so a turn that streams several
+        blocks still produces one response — unless it keeps going past
+        ``OUTBOX_MAX_WAIT_SECONDS``, at which point waiting longer risks the
+        callback expiring and losing everything.
+        """
+        outbox = self._outbox[chat_id]
+        existing = outbox.flush_task
+        if existing is not None and not existing.done():
+            existing.cancel()
+
+        outbox.flush_task = asyncio.create_task(
+            self._flush_after_debounce(chat_id), name=f"kakao-flush-{chat_id}"
+        )
+
+    async def _flush_after_debounce(self, chat_id: str) -> None:
+        outbox = self._outbox[chat_id]
+        elapsed = time.monotonic() - outbox.first_buffered_at
+        delay = min(OUTBOX_DEBOUNCE_SECONDS, max(0.0, OUTBOX_MAX_WAIT_SECONDS - elapsed))
+
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return  # superseded by a later block
+
+        await self._flush(chat_id)
+
+    async def _flush(self, chat_id: str) -> None:
+        """Deliver everything buffered for this chat as one Kakao response."""
+        outbox = self._outbox[chat_id]
+        chunks, override = outbox.chunks, outbox.override
+        outbox.chunks, outbox.override = [], None
+
+        if not chunks and override is None:
+            return
+
         message_id = self._take_message_id(chat_id)
         if not message_id:
-            return SendResult(
-                success=False,
-                error=(
-                    f"No unused inbound message to reply to for chat {chat_id}. "
-                    "Every KakaoTalk callback is single use, so a reply needs its "
-                    "own inbound message and one may already have expired."
-                ),
-                retryable=False,
+            logger.warning(
+                "[kakao] Dropping reply for %s: no unused inbound message. Every "
+                "KakaoTalk callback is single use, so a reply needs its own "
+                "inbound message and one may already have expired.",
+                chat_id,
             )
+            return
 
-        text = strip_markdown(content)
+        response = override if override is not None else self._build_text_response(chunks)
+
+        try:
+            result = await send_reply(
+                RelayClientConfig(relay_url=self._relay_url, relay_token=self._relay_token or ""),
+                message_id,
+                response,
+            )
+        except RelayHttpError as error:
+            logger.warning("[kakao] Reply delivery failed: %s", error)
+            return
+        except Exception as error:  # noqa: BLE001
+            logger.warning("[kakao] Reply delivery failed: %s", error)
+            return
+
+        if not result.success:
+            logger.warning("[kakao] Relay rejected the reply: %s", result.error)
+
+    async def _flush_all(self) -> None:
+        """Flush every pending outbox, cancelling their debounce timers."""
+        for chat_id, outbox in list(self._outbox.items()):
+            task = outbox.flush_task
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            outbox.flush_task = None
+
+            with contextlib.suppress(Exception):
+                await self._flush(chat_id)
+
+    def _build_text_response(self, chunks: list[str]) -> dict[str, Any]:
+        """Combine buffered blocks into one response of at most 3 bubbles.
+
+        Kakao caps a response at ``OUTPUTS_MAX`` outputs and each bubble at
+        ``SIMPLE_TEXT_MAX`` characters. Anything past that cannot be delivered
+        in this turn at all — there is no second callback — so it is truncated
+        visibly rather than silently dropped.
+        """
+        text = "\n\n".join(chunks)
         if self.kakao_config.response_prefix:
             text = f"{self.kakao_config.response_prefix}{text}"
 
-        response = self._build_response(text, metadata)
-
-        client_config = RelayClientConfig(
-            relay_url=self._relay_url, relay_token=self._relay_token
+        bubbles = chunk_text_for_kakao(
+            text, self.kakao_config.text_chunk_limit, self.kakao_config.chunk_mode
         )
 
-        try:
-            result = await send_reply(client_config, message_id, response)
-        except RelayHttpError as error:
-            return SendResult(
-                success=False,
-                error=str(error),
-                retryable=not error.is_auth_error,
+        if len(bubbles) > KakaoLimits.OUTPUTS_MAX:
+            dropped = len(bubbles) - KakaoLimits.OUTPUTS_MAX
+            logger.warning(
+                "[kakao] Reply needed %d bubbles; Kakao allows %d. Truncating %d.",
+                len(bubbles),
+                KakaoLimits.OUTPUTS_MAX,
+                dropped,
             )
-        except Exception as error:  # noqa: BLE001
-            return SendResult(success=False, error=str(error), retryable=True)
+            bubbles = bubbles[: KakaoLimits.OUTPUTS_MAX]
+            bubbles[-1] = f"{bubbles[-1]}\n\n…(잘림)"
 
-        return SendResult(
-            success=result.success,
-            message_id=message_id,
-            error=result.error,
-            retryable=not result.success,
+        return build_multi_text_response(
+            [bubble[: KakaoLimits.SIMPLE_TEXT_MAX] for bubble in bubbles]
         )
 
-    def _build_response(
-        self, text: str, metadata: dict[str, Any] | None
-    ) -> dict[str, Any]:
-        """Build the Kakao skill response, honoring a channelData override.
+    @staticmethod
+    def _extract_override(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+        """A fully-formed Kakao response supplied by the agent.
 
-        An agent can emit a fully-formed Kakao response by putting it at
-        ``metadata["channel_data"]["kakao"]`` — the Python equivalent of the
-        OpenClaw plugin's ``channelData.kakao`` pattern.
+        The Python equivalent of the OpenClaw plugin's ``channelData.kakao``.
         """
         channel_data = (metadata or {}).get("channel_data") or {}
-        kakao_override = channel_data.get("kakao")
-
-        if isinstance(kakao_override, dict) and kakao_override.get("version") == "2.0":
-            return kakao_override
-
-        return build_simple_text_response(text)
+        override = channel_data.get("kakao")
+        if isinstance(override, dict) and override.get("version") == "2.0":
+            return override
+        return None
 
     def _take_message_id(self, chat_id: str) -> str | None:
         """Claim the oldest unused inbound message id for this chat.
