@@ -374,7 +374,16 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
                 retryable=True,
             )
 
-        message_id = reply_to or self._take_message_id(chat_id)
+        # `reply_to` is deliberately ignored for callback selection.
+        #
+        # It is a *threading* hint — Hermes passes the originating message id
+        # per `reply_to_mode` (default "first") so platforms that thread can
+        # attach the reply. KakaoTalk has no threading, and its callbacks are
+        # single use, so honouring it meant every reply in a turn targeted the
+        # same already-spent callback. The relay log made this unambiguous:
+        # every failure carried one messageId and one cbtoken, retried until
+        # Kakao answered 400. The queue is the only correct source here.
+        message_id = self._take_message_id(chat_id)
         if not message_id:
             return SendResult(
                 success=False,

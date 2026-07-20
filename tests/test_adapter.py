@@ -351,9 +351,17 @@ class TestCallbackIsSingleUse:
         assert result.success is False
         assert sent == []
 
-    async def test_reply_to_takes_precedence(
+    async def test_reply_to_is_ignored_for_callback_selection(
         self, adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """`reply_to` is a threading hint, not a callback selector.
+
+        Hermes passes the originating message id on every send of a turn
+        (`reply_to_mode` defaults to "first"). Honouring it meant every reply
+        targeted the same single-use callback: the relay log showed one
+        messageId and one cbtoken retried until Kakao answered 400. KakaoTalk
+        has no threading, so the queue is the only correct source.
+        """
         sent: list[str] = []
         monkeypatch.setattr(
             "hermes_kakao_talkchannel.adapter.send_reply", self._recorder(sent)
@@ -361,11 +369,29 @@ class TestCallbackIsSingleUse:
 
         adapter._pending_message_ids["u"].append(("queued", time.time()))
 
-        await adapter.send("u", "answer", reply_to="explicit")
+        await adapter.send("u", "answer", reply_to="threading-hint")
 
-        assert sent == ["explicit"]
-        # The queued id is untouched and still available.
-        assert len(adapter._pending_message_ids["u"]) == 1
+        assert sent == ["queued"]
+        assert not adapter._pending_message_ids["u"]
+
+    async def test_repeated_sends_for_one_inbound_do_not_reuse_the_callback(
+        self, adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The exact VM failure: one inbound, several sends, all carrying the
+        # same reply_to. Only the first may go out.
+        sent: list[str] = []
+        monkeypatch.setattr(
+            "hermes_kakao_talkchannel.adapter.send_reply", self._recorder(sent)
+        )
+
+        adapter._pending_message_ids["u"].append(("m1", time.time()))
+
+        results = [
+            await adapter.send("u", f"part {i}", reply_to="m1") for i in range(3)
+        ]
+
+        assert sent == ["m1"]
+        assert [r.success for r in results] == [True, False, False]
 
     async def test_a_suppressed_notice_does_not_consume_an_id(
         self, adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
