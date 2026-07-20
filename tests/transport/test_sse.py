@@ -84,8 +84,15 @@ def test_backoff_grows_exponentially() -> None:
     assert 4000 <= second < 4800
 
 
-def test_backoff_can_exceed_the_cap_by_up_to_twenty_percent() -> None:
-    # AS-IS (D3): jitter is added after the cap rather than before it.
-    delays = [calculate_reconnect_delay(20, 1000, 30000) for _ in range(200)]
-    assert min(delays) >= 30000
-    assert max(delays) <= 36000
+def test_backoff_never_exceeds_the_cap() -> None:
+    # The original capped first and added jitter afterwards, so 30000 could
+    # come back as 35999.
+    for attempt in range(40):
+        for _ in range(25):
+            assert calculate_reconnect_delay(attempt, 1000, 30000) <= 30000
+
+
+def test_backoff_still_jitters_below_the_cap() -> None:
+    delays = {calculate_reconnect_delay(1, 1000, 30000) for _ in range(200)}
+    assert len(delays) > 1
+    assert min(delays) >= 2000

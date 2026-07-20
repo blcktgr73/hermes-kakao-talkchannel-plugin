@@ -4,19 +4,25 @@ Faithful port of ``src/relay/session.ts``. Neither call sends an Authorization
 header; ``create_session`` is how an unpaired client bootstraps a token, and the
 returned pairing code is what the user sends to the KakaoTalk channel.
 
-AS-IS (D6): the original passes no timeout. Reproduced here.
+Both calls carry an explicit timeout. The original passed none, so an
+unresponsive relay would stall pairing for aiohttp's 5-minute default.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
+from urllib.parse import quote
 
 import aiohttp
 
 from .models import CreateSessionResponse, RelayError, SessionStatusResponse
 
 DEFAULT_RELAY_URL = "https://k.tess.dev/"
+
+#: Matches the relay client's budget. Without it these calls inherit
+#: aiohttp's 5-minute default and an unresponsive relay stalls pairing.
+_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 T = TypeVar("T")
 
@@ -36,7 +42,7 @@ async def create_session(relay_url: str = DEFAULT_RELAY_URL) -> RelayResult[Crea
     """Create an unpaired relay session and obtain a pairing code."""
     url = f"{normalize_relay_url(relay_url)}v1/sessions/create"
     try:
-        async with aiohttp.ClientSession() as session, session.post(
+        async with aiohttp.ClientSession(timeout=_TIMEOUT) as session, session.post(
             url, json={}, headers={"Content-Type": "application/json"}
         ) as response:
             if response.status < 200 or response.status >= 300:
@@ -69,10 +75,13 @@ async def check_session_status(
     relay_url: str = DEFAULT_RELAY_URL,
 ) -> RelayResult[SessionStatusResponse]:
     """Poll a session's pairing status. The token travels in the path, not a header."""
-    url = f"{normalize_relay_url(relay_url)}v1/sessions/{session_token}/status"
+    url = (
+        f"{normalize_relay_url(relay_url)}v1/sessions/"
+        f"{quote(session_token, safe='')}/status"
+    )
     try:
         async with (
-            aiohttp.ClientSession() as session,
+            aiohttp.ClientSession(timeout=_TIMEOUT) as session,
             session.get(url, headers={"Accept": "application/json"}) as response,
         ):
             if response.status < 200 or response.status >= 300:

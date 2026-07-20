@@ -182,12 +182,28 @@ async def test_health_check_ok(relay: tuple[RelayStub, str]) -> None:
     assert result.latency_ms is not None
 
 
-async def test_health_check_produces_a_double_slash_url(relay: tuple[RelayStub, str]) -> None:
-    # AS-IS (D1): health_check alone skips trailing-slash normalization.
+async def test_health_check_normalizes_the_trailing_slash(
+    relay: tuple[RelayStub, str],
+) -> None:
+    # The original concatenated onto a URL already ending in a slash, so the
+    # default relay URL produced //health. The relay registers the route at the
+    # root as r.Get("/health").
     stub, base_url = relay
     assert base_url.endswith("/")
+
     await health_check(RelayClientConfig(relay_url=base_url, relay_token="tok"))
-    assert stub.requests[0]["path"] == "//health"
+
+    assert stub.requests[0]["path"] == "/health"
+
+
+async def test_health_check_adds_a_missing_trailing_slash(
+    relay: tuple[RelayStub, str],
+) -> None:
+    stub, base_url = relay
+
+    await health_check(RelayClientConfig(relay_url=base_url.rstrip("/"), relay_token="tok"))
+
+    assert stub.requests[0]["path"] == "/health"
 
 
 async def test_health_check_reports_failure_without_raising(

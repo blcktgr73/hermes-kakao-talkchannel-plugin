@@ -8,17 +8,30 @@
 코드에서는 `AS-IS (D<n>)` 주석으로 표시되어 있고, 각 항목은 테스트로 현재 동작이
 고정되어 있습니다. 고칠 때는 테스트도 함께 바꿔야 합니다.
 
-| ID | 이슈 | 요약 | 위치 | 영향 |
-|---|---|---|---|---|
-| D1 | [#1](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/1) | `/health`만 트레일링 슬래시 정규화를 안 해 `//health` 요청 | `transport/client.py` `health_check` | 낮음 (릴레이가 관대하면 무해) |
-| D2 | [#2](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/2) | 300초 타임아웃이 정상 연결도 끊음 | `transport/sse.py` `connect_sse` | 중간 |
-| D3 | [#3](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/3) | 지터가 상한 적용 *후* 더해져 최대 20% 초과 | `transport/sse.py` `calculate_reconnect_delay` | 낮음 |
-| D4 | [#4](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/4) | `ping` 이벤트 미처리, 유휴 워치독 없음 | `transport/sse.py` `_read_stream` | 중간 |
-| D5 | [#5](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/5) | 멀티라인 `data:` 중 마지막 줄만 사용 | `transport/sse.py` `parse_sse_chunk` | 미지 |
-| D6 | [#6](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/6) | 세션/콜백 호출에 명시적 타임아웃 없음 | `transport/session.py`, `kakao/callback.py` | 낮음 |
-| D7 | [#7](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/7) | 릴레이 응답 경로에 `openclaw`가 하드코딩 | `transport/client.py` `send_reply` | 명명 문제 |
+**2026-07-20 갱신.** 실기 검증으로 근거가 생긴 것들은 고쳤습니다. 관측이 필요한
+항목만 as-is로 남아 있습니다.
 
-관련: [#8 실제 Hermes 설치본으로 엔드투엔드 검증 필요](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/8)
+| ID | 이슈 | 요약 | 상태 |
+|---|---|---|---|
+| D1 | [#1](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/1) | `/health`만 정규화를 안 해 `//health` 요청 | **수정** — 릴레이가 `r.Get("/health")`로 등록하고, 수정 후 `probe ok` 85ms 실증 |
+| D2 | [#2](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/2) | 300초 타임아웃이 정상 연결도 끊음 | as-is — 다만 **릴레이가 60초에 먼저 끊으므로 실제로 발동하지 않습니다** |
+| D3 | [#3](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/3) | 지터가 상한 적용 *후* 더해져 최대 20% 초과 | **수정** — 순수 클라이언트 계산이라 관측 불필요 |
+| D4 | [#4](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/4) | `ping` 미처리, 유휴 워치독 없음 | as-is — **심각도 하락**. 릴레이의 60초 종료가 죽은 연결을 대신 감지 |
+| D5 | [#5](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/5) | 멀티라인 `data:` 중 마지막 줄만 사용 | as-is — 릴레이가 멀티라인을 보내는지 여전히 미확인 |
+| D6 | [#6](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/6) | 세션 호출에 타임아웃 없음 | **수정** — 10초 + 토큰 URL 인코딩 |
+| D7 | [#7](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/7) | 응답 경로에 `openclaw` 하드코딩 | as-is — 릴레이 변경이 선행 |
+
+[#8 엔드투엔드 검증](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/8)은
+2026-07-20 완료.
+
+### 이식 당시 없던, 실기에서 드러난 결함
+
+as-is 이식 목록에는 없었지만 실제로 가장 큰 피해를 준 것입니다.
+
+**SSE 정상 종료 후 백오프 없는 재연결.** 서버가 즉시 닫으면 재연결 루프가 됩니다.
+릴레이가 subscribe마다 `queued`를 재flush하므로, **인바운드 1건이 94번 재전송되어
+94개 에이전트 턴이 시작**됐습니다. TS 원본에도 같은 구멍이 있습니다.
+→ 수정: 정상 종료 재연결에 지연 + 이미 처리한 메시지 id 무시.
 
 ---
 

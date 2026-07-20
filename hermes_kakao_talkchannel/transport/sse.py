@@ -74,16 +74,16 @@ class SSEHandlers:
 
 
 def calculate_reconnect_delay(attempt: int, base_delay_ms: int, max_delay_ms: int) -> int:
-    """Exponential backoff with additive jitter.
+    """Exponential backoff with additive jitter, capped.
 
-    AS-IS (D3): jitter is added *after* the cap, so the result can exceed
-    ``max_delay_ms`` by up to 20%. Callers pass an already-incremented attempt,
-    so the first retry uses ``attempt=1``.
+    The original capped first and added jitter afterwards, so the result could
+    exceed ``max_delay_ms`` by up to 20% (30000 became as much as 35999).
+    Callers pass an already-incremented attempt, so the first retry uses
+    ``attempt=1``.
     """
     exponential_delay = base_delay_ms * (2**attempt)
-    capped_delay = min(exponential_delay, max_delay_ms)
-    jitter = capped_delay * 0.2 * random.random()
-    return math.floor(capped_delay + jitter)
+    jitter = min(exponential_delay, max_delay_ms) * 0.2 * random.random()
+    return math.floor(min(exponential_delay + jitter, max_delay_ms))
 
 
 def parse_sse_chunk(chunk: str) -> ParsedChunk:

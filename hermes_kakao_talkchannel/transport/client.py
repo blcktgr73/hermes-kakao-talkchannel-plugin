@@ -111,10 +111,13 @@ def _validate_send_reply_response(data: Any) -> SendReplyResponse:
 async def health_check(config: RelayClientConfig) -> HealthResult:
     """Probe relay reachability. Never raises.
 
-    AS-IS (D1): unlike every other call, this one does *not* normalize the
-    trailing slash, so the default relay URL yields ``https://k.tess.dev//health``.
+    Normalized like every other relay call. The original concatenated
+    ``/health`` onto a URL that already ends in a slash, producing
+    ``https://host//health``. The relay registers the route as ``r.Get("/health")``
+    at the root, and the fixed path returned ``ok`` with 85ms latency on a live
+    gateway, so the extra slash was never intentional.
     """
-    url = f"{config.relay_url}/health"
+    url = f"{_normalize_base_url(config.relay_url)}health"
     timeout = aiohttp.ClientTimeout(total=(config.timeout_ms or DEFAULT_TIMEOUT_MS) / 1000)
     started = time.monotonic()
 
