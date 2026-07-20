@@ -72,11 +72,33 @@ class Staleness:
     age_seconds: float
 
 
+def _hermes_home() -> Path:
+    """Where Hermes keeps its state, asking Hermes when it can be asked.
+
+    Its own resolution is context-local override → ``HERMES_HOME`` →
+    platform-native default, and profiles work by changing that home rather
+    than by nesting under a shared one. Two things the fallback below gets
+    wrong and the real function gets right: the per-task override used when one
+    process serves several profiles, and the Windows default
+    (``%LOCALAPPDATA%/hermes``, not ``~/.hermes``).
+    """
+    try:
+        from hermes_constants import get_hermes_home  # type: ignore[import-not-found]
+
+        return Path(get_hermes_home())
+    except Exception:  # noqa: BLE001 - tests and non-Hermes environments
+        base = os.environ.get("HERMES_HOME", "").strip()
+        if base:
+            return Path(base)
+        if os.name == "nt":
+            local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+            root = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
+            return root / "hermes"
+        return Path.home() / ".hermes"
+
+
 def resolve_state_dir() -> Path:
-    """Mirrors Hermes: ``HERMES_HOME`` if set, else the OS home."""
-    base = os.environ.get("HERMES_HOME")
-    root = Path(base) if base else Path.home() / ".hermes"
-    return root / "kakao-talkchannel"
+    return _hermes_home() / "kakao-talkchannel"
 
 
 def _file_path(name: str) -> Path:

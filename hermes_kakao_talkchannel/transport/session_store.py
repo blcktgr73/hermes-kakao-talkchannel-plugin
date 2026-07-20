@@ -20,15 +20,16 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_STATE_DIR_ENV = "HERMES_HOME"
-_DEFAULT_STATE_DIR = Path.home() / ".hermes"
-_STORE_SUBPATH = Path("kakao-talkchannel") / "session.json"
+_STORE_FILE = "session.json"
 
 
 def _store_path() -> Path:
-    base = os.environ.get(_STATE_DIR_ENV)
-    root = Path(base) if base else _DEFAULT_STATE_DIR
-    return root / _STORE_SUBPATH
+    # Shares the pairing state directory so both follow Hermes' own home
+    # resolution — including the per-task profile override and the Windows
+    # default, which an env-var-only lookup gets wrong.
+    from ..pairing.state_file import resolve_state_dir
+
+    return resolve_state_dir() / _STORE_FILE
 
 
 def load_session_token(channel_id: str = "default") -> str | None:
