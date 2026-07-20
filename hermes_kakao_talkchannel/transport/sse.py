@@ -89,10 +89,14 @@ def calculate_reconnect_delay(attempt: int, base_delay_ms: int, max_delay_ms: in
 def parse_sse_chunk(chunk: str) -> ParsedChunk:
     """Parse complete SSE events out of a buffer.
 
-    AS-IS (D5): only the last ``data:`` line of a block is kept, so multi-line
-    ``data:`` fields (which the SSE spec says to join with newlines) are
-    truncated. Events lacking either an ``event:`` name or a ``data:`` body are
-    dropped silently and do not count as parse errors.
+    ``data:`` lines are joined with newlines, per the SSE spec. The original
+    kept only the last one, so a multi-line payload lost everything before it.
+    Whether the relay ever sends one is still unobserved — but joining is a
+    no-op when there is a single line, so waiting for proof bought nothing and
+    risked silent corruption if it ever happened.
+
+    Events lacking either an ``event:`` name or a ``data:`` body are dropped
+    silently and do not count as parse errors.
     """
     events: list[SSEEvent] = []
     consumed = 0
@@ -108,7 +112,7 @@ def parse_sse_chunk(chunk: str) -> ParsedChunk:
         end_pos = boundary + 2
 
         event_name: str | None = None
-        data_line: str | None = None
+        data_lines: list[str] = []
         event_id: str | None = None
 
         for line in block.split("\n"):
@@ -117,9 +121,11 @@ def parse_sse_chunk(chunk: str) -> ParsedChunk:
             if line.startswith("event:"):
                 event_name = line[6:].strip()
             elif line.startswith("data:"):
-                data_line = line[5:].strip()
+                data_lines.append(line[5:].strip())
             elif line.startswith("id:"):
                 event_id = line[3:].strip()
+
+        data_line = "\n".join(data_lines) if data_lines else None
 
         if event_name and data_line:
             try:

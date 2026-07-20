@@ -14,15 +14,29 @@
 | ID | 이슈 | 요약 | 상태 |
 |---|---|---|---|
 | D1 | [#1](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/1) | `/health`만 정규화를 안 해 `//health` 요청 | **수정** — 릴레이가 `r.Get("/health")`로 등록하고, 수정 후 `probe ok` 85ms 실증 |
-| D2 | [#2](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/2) | 300초 타임아웃이 정상 연결도 끊음 | as-is — 다만 **릴레이가 60초에 먼저 끊으므로 실제로 발동하지 않습니다** |
+| D2 | [#2](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/2) | 300초 타임아웃이 정상 연결도 끊음 | **도달 불가** — 릴레이가 60초에 먼저 끊습니다 |
 | D3 | [#3](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/3) | 지터가 상한 적용 *후* 더해져 최대 20% 초과 | **수정** — 순수 클라이언트 계산이라 관측 불필요 |
-| D4 | [#4](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/4) | `ping` 미처리, 유휴 워치독 없음 | as-is — **심각도 하락**. 릴레이의 60초 종료가 죽은 연결을 대신 감지 |
-| D5 | [#5](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/5) | 멀티라인 `data:` 중 마지막 줄만 사용 | as-is — 릴레이가 멀티라인을 보내는지 여전히 미확인 |
+| D4 | [#4](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/4) | `ping` 미처리, 유휴 워치독 없음 | **실익 없음** — 릴레이의 60초 종료가 죽은 연결을 대신 감지 |
+| D5 | [#5](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/5) | 멀티라인 `data:` 중 마지막 줄만 사용 | **수정** — 명세대로 이어붙임 |
 | D6 | [#6](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/6) | 세션 호출에 타임아웃 없음 | **수정** — 10초 + 토큰 URL 인코딩 |
-| D7 | [#7](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/7) | 응답 경로에 `openclaw` 하드코딩 | as-is — 릴레이 변경이 선행 |
+| D7 | [#7](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/7) | 응답 경로에 `openclaw` 하드코딩 | **명명 문제** — 기능 영향 없음, 릴레이 별칭 선행 |
 
 [#8 엔드투엔드 검증](https://github.com/blcktgr73/hermes-kakao-talkchannel-plugin/issues/8)은
-2026-07-20 완료.
+2026-07-20 완료. **이슈는 모두 닫혔습니다.**
+
+### D5에 대한 판단 정정
+
+"관측 없이 고치면 순수 리스크"라고 적었던 것은 틀렸습니다. `data:` 줄을 이어붙이는
+것은 **줄이 하나뿐일 때 no-op**이라, 릴레이가 단일 라인만 보내도 위험이 없습니다.
+명세 자체가 근거이므로 관측을 기다릴 이유가 없었습니다. 신중함을 잘못 계산한 사례로
+남깁니다.
+
+### D2 / D4가 다시 살아나는 조건
+
+릴레이의 `chimiddleware.Timeout(60s)`가 제거되면 **둘 다 즉시 실제 문제가 됩니다.**
+그 변경은 `kakao-talkchannel-relay-openclaw`의 `cmd/server/main.go`에 미커밋 상태로
+있습니다. 그것을 배포한다면 이 두 항목을 같은 작업에서 함께 다뤄야 합니다 — 지금은
+릴레이의 60초 재활용이 연결 수명 관리를 대신하고 있습니다.
 
 ### 이식 당시 없던, 실기에서 드러난 결함
 

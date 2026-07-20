@@ -65,10 +65,18 @@ def test_event_without_data_is_dropped_silently() -> None:
     assert parsed.parse_errors == 0
 
 
-def test_multiline_data_keeps_only_the_last_line() -> None:
-    # AS-IS (D5): the SSE spec says to join data lines; the original does not.
-    parsed = parse_sse_chunk('event: message\ndata: {"a": 1}\ndata: {"b": 2}\n\n')
-    assert parsed.events[0].data == {"b": 2}
+def test_multiline_data_is_joined_per_the_spec() -> None:
+    # The original kept only the last line, losing everything before it. A
+    # payload split across lines is valid SSE and must reassemble.
+    parsed = parse_sse_chunk('event: message\ndata: {"a": 1,\ndata: "b": 2}\n\n')
+    assert parsed.events[0].data == {"a": 1, "b": 2}
+
+
+def test_a_single_data_line_is_unaffected() -> None:
+    # Joining is a no-op here, which is why this did not need to wait for
+    # proof that the relay ever sends multi-line payloads.
+    parsed = parse_sse_chunk('event: message\ndata: {"a": 1}\n\n')
+    assert parsed.events[0].data == {"a": 1}
 
 
 def test_empty_buffer_yields_nothing() -> None:
