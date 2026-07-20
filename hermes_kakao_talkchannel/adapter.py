@@ -14,17 +14,36 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import time
+from dataclasses import replace
 from typing import Any
 
 from .config import PLATFORM_NAME, KakaoConfig, load_config
 from .hermes_compat import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from .kakao.markdown import strip_markdown
 from .kakao.response import build_simple_text_response
+from .pairing.publisher import PairingPublisher
+from .pairing.registry import (
+    PairingSnapshot,
+    add_pairing_waiter,
+    record_pairing_complete,
+    record_pairing_expired,
+    record_pairing_required,
+    record_session_invalidated,
+    record_session_reused,
+    register_account,
+    unregister_account,
+)
 from .transport.client import RelayClientConfig, RelayHttpError, health_check, send_reply
 from .transport.models import InboundMessage
-from .transport.relay import StreamCallbacks, start_relay_stream
-from .transport.session_store import load_session_token
+from .transport.relay import (
+    LEGACY_RELAY_TOKEN_ENV,
+    RELAY_TOKEN_ENV,
+    StreamCallbacks,
+    start_relay_stream,
+)
+from .transport.session_store import forget_session_token, load_session_token
 from .transport.sse import SSESessionInvalidatedError
 
 logger = logging.getLogger(__name__)
@@ -55,6 +74,15 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
         # relay message a reply belongs to.
         self._last_message_id: dict[str, str] = {}
 
+        self._account_id = self.kakao_config.channel_id or "default"
+        # Supervisor state for re-issuing a pairing code without restarting the
+        # gateway: a request aborts the inner stream and the loop runs again
+        # with the saved session token stripped.
+        self._inner_stop = asyncio.Event()
+        self._reissue_requested = False
+        self._running = False
+        self._publisher = PairingPublisher()
+
     # -- lifecycle ---------------------------------------------------------
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -77,34 +105,128 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
             on_disconnected=self._mark_disconnected,
         )
 
+        self._running = True
+        register_account(self._account_id, self._account_id, self)
+        # The CLI runs in a different process and Hermes has no channel into a
+        # running gateway, so state is published to disk and re-issue requests
+        # are polled from it.
+        self._publisher.start()
+
         self._stream_task = asyncio.create_task(
             self._run_stream(callbacks), name="kakao-relay-stream"
         )
         return True
 
     async def _run_stream(self, callbacks: StreamCallbacks) -> None:
+        """Supervise the relay stream, restarting it for a forced re-issue."""
         try:
-            await start_relay_stream(
-                config=self.kakao_config,
-                on_message=self._on_inbound_message,
-                stop_event=self._stop_event,
-                callbacks=callbacks,
-                channel_id=self.kakao_config.channel_id or "default",
-            )
+            while not self._stop_event.is_set():
+                # On a forced re-issue the saved token must not come back through
+                # config, or resolve_token short-circuits before create_session
+                # and no new code is ever issued.
+                config = self.kakao_config
+                if self._reissue_requested:
+                    config = replace(config, session_token=None)
+                elif config.session_token:
+                    record_session_reused(self._account_id, self._account_id)
+
+                self._reissue_requested = False
+                # One event drives the stream. `disconnect` sets both this and
+                # the outer stop, so there is no second signal to combine.
+                self._inner_stop = asyncio.Event()
+
+                try:
+                    await start_relay_stream(
+                        config=config,
+                        on_message=self._on_inbound_message,
+                        stop_event=self._inner_stop,
+                        callbacks=callbacks,
+                        channel_id=self._account_id,
+                    )
+                except SSESessionInvalidatedError as error:
+                    if self._stop_event.is_set():
+                        return
+                    self._set_fatal_error(
+                        "session_invalidated",
+                        f"Relay rejected the session token (HTTP {error.status}). "
+                        "Re-pair to continue.",
+                        retryable=True,
+                    )
+                    return
+                except Exception as error:  # noqa: BLE001
+                    if self._stop_event.is_set():
+                        return
+                    # A re-issue aborts the stream on purpose; anything else is real.
+                    if not self._reissue_requested:
+                        logger.exception("[kakao] Relay stream terminated")
+                        self._set_fatal_error(
+                            "relay_stream_failed", str(error), retryable=True
+                        )
+                        return
+
+                if self._stop_event.is_set():
+                    return
+                # The stream ended on its own and no re-issue is pending.
+                if not self._reissue_requested:
+                    return
         except asyncio.CancelledError:
             raise
-        except SSESessionInvalidatedError as error:
-            self._set_fatal_error(
-                "session_invalidated",
-                f"Relay rejected the session token (HTTP {error.status}). Re-pair to continue.",
-                retryable=True,
+        finally:
+            self._running = False
+            unregister_account(self._account_id)
+            await self._publisher.stop()
+
+    # -- AccountController -------------------------------------------------
+
+    def reissue_blocked_reason(self) -> str | None:
+        """A static token means resolve_token never calls create_session."""
+        if not self._running:
+            return "account is not running"
+        if self.kakao_config.relay_token:
+            return (
+                "This account uses a configured relay token, so it never pairs. "
+                "Unset KAKAO_RELAY_TOKEN to use pairing."
             )
-        except Exception as error:  # noqa: BLE001
-            logger.exception("[kakao] Relay stream terminated")
-            self._set_fatal_error("relay_stream_failed", str(error), retryable=True)
+        for env_name in (RELAY_TOKEN_ENV, LEGACY_RELAY_TOKEN_ENV):
+            if os.environ.get(env_name):
+                return f"{env_name} is set, so this account never pairs. Unset it to pair."
+        return None
+
+    async def request_new_pairing(self, timeout_seconds: float) -> PairingSnapshot:
+        """Drop the current session and wait for a fresh code. No restart."""
+        logger.info("[kakao] Re-issuing pairing code on request")
+
+        # Drop every copy of the current token, or resolve_token reuses it.
+        forget_session_token(self._account_id)
+        self.kakao_config.session_token = None
+        self._relay_token = None
+        record_session_invalidated(self._account_id, self._account_id)
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[PairingSnapshot] = loop.create_future()
+
+        def on_issued(snapshot: PairingSnapshot) -> None:
+            if not future.done():
+                loop.call_soon_threadsafe(future.set_result, snapshot)
+
+        # Start waiting before triggering, so a fast relay cannot answer first.
+        cancel_waiter = add_pairing_waiter(self._account_id, on_issued)
+        self._reissue_requested = True
+        self._inner_stop.set()
+
+        try:
+            return await asyncio.wait_for(future, timeout=timeout_seconds)
+        except TimeoutError as error:
+            raise RuntimeError(
+                f"Timed out after {timeout_seconds:.0f}s waiting for a pairing code"
+            ) from error
+        finally:
+            cancel_waiter()
 
     async def disconnect(self) -> None:
         self._stop_event.set()
+        # The supervisor waits on the inner event, so it must be released too.
+        self._inner_stop.set()
 
         if self._stream_task and not self._stream_task.done():
             self._stream_task.cancel()
@@ -247,6 +369,8 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
 
     def _on_pairing_required(self, pairing_code: str, expires_in: int) -> None:
         self._pairing_code = pairing_code
+        record_pairing_required(self._account_id, self._account_id, pairing_code, expires_in)
+
         minutes = max(1, expires_in // 60)
         logger.warning(
             "[kakao] Pairing required. Send this code to your KakaoTalk channel "
@@ -254,13 +378,19 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
             minutes,
             pairing_code,
         )
+        logger.warning("[kakao] Re-read it any time: hermes kakao pairing status")
 
     def _on_pairing_complete(self, kakao_user_id: str) -> None:
+        # The relay sends this ~4x in 2s. Without the dedupe each one would
+        # repeat the side effects below.
+        if not record_pairing_complete(self._account_id, self._account_id, kakao_user_id):
+            return
         self._pairing_code = None
         logger.info("[kakao] Paired with KakaoTalk user %s", kakao_user_id)
 
     def _on_pairing_expired(self, reason: str) -> None:
         self._pairing_code = None
+        record_pairing_expired(self._account_id, self._account_id)
         logger.warning("[kakao] Pairing expired: %s", reason)
 
     def _on_token_resolved(self, token: str, relay_url: str) -> None:
@@ -270,6 +400,7 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
     def _on_session_invalidated(self, status: int) -> None:
         self._relay_token = None
         self.kakao_config.session_token = None
+        record_session_invalidated(self._account_id, self._account_id)
 
     @property
     def pending_pairing_code(self) -> str | None:

@@ -14,9 +14,14 @@ def register(ctx: Any) -> None:
     modules lazily so heavy SDK imports don't slow down every ``hermes``
     invocation (docs/00-hermes-plugin-sdk.md §4).
     """
+    from .pairing.cli import register_pairing_cli
     from .registration import register_platform
 
     register_platform(ctx)
+
+    # Pairing state lives in the gateway process; the CLI reads it from disk
+    # because Hermes has no channel into a running gateway.
+    register_pairing_cli(ctx)
 
 
 __all__ = ["__version__", "register"]

@@ -7,9 +7,23 @@
 (TypeScript / OpenClaw)을 Python / asyncio로 이식했습니다.
 
 > **상태: 초기 개발 단계 (v0.1.0).**
-> 순수 도메인 계층과 릴레이 트랜스포트는 구현·테스트 완료(193개 통과).
+> 순수 도메인 계층, 릴레이 트랜스포트, 페어링 CLI까지 구현·테스트 완료(274개 통과).
 > 어댑터가 실제 Hermes 게이트웨이에 붙는 것은 **아직 검증되지 않았습니다** —
 > 아래 "검증되지 않은 것" 참고.
+
+## 운영자용 페어링 CLI
+
+```bash
+hermes kakao pairing status   # 현재 코드 조회 (몇 번이든 가능)
+hermes kakao pairing new      # 재시작 없이 세션 폐기 후 새 코드 발급
+```
+
+Hermes에는 실행 중인 게이트웨이로 들어가는 제어 채널이 없으므로, 게이트웨이가 상태를
+파일로 발행하고 CLI가 그것을 읽습니다. 자세한 내용은
+[docs/PAIRING_OPERATIONS.md](docs/PAIRING_OPERATIONS.md).
+
+이 설계는 [OpenClaw 판](https://github.com/blcktgr73/openclaw-kakao-talkchannel-plugin)에서
+실기 검증을 마친 뒤 이식했습니다.
 
 ## 동작 방식
 
@@ -119,11 +133,12 @@ Hermes가 설치되어 있지 않아도 테스트는 돕니다 — `hermes_compa
 hermes_kakao_talkchannel/
   __init__.py        register(ctx) 진입점
   registration.py    ctx.register_platform 콜백 모음
-  adapter.py         KakaoAdapter — connect / disconnect / send
+  adapter.py         KakaoAdapter — connect / disconnect / send + 재발급 감시 루프
   config.py          설정 SSOT (env > YAML)
   hermes_compat.py   호스트 import + 테스트용 스텁
   kakao/             순수 도메인 (Hermes import 금지, AST 테스트로 강제)
   transport/         릴레이 SSE + HTTP 클라이언트
+  pairing/           페어링 레지스트리 · 상태 파일 · 발행자 · CLI
 ```
 
 ## 검증되지 않은 것

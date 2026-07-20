@@ -14,13 +14,17 @@ from hermes_kakao_talkchannel.registration import (
 
 
 class FakeContext:
-    """Stand-in for Hermes' PluginContext, capturing the registration call."""
+    """Stand-in for Hermes' PluginContext, capturing the registration calls."""
 
     def __init__(self) -> None:
         self.platforms: list[dict[str, Any]] = []
+        self.cli_commands: list[dict[str, Any]] = []
 
     def register_platform(self, **kwargs: Any) -> None:
         self.platforms.append(kwargs)
+
+    def register_cli_command(self, **kwargs: Any) -> None:
+        self.cli_commands.append(kwargs)
 
 
 def test_register_registers_exactly_one_platform() -> None:
