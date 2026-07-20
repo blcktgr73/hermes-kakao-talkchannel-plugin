@@ -78,6 +78,14 @@ _TRANSIENT_ACK_PREFIXES = (
     "⏳ Subagent working",
     "⏳ Compressing context",
     "⏩ Steered into current run",
+    # Meta-messages about the transport itself. Announcing that delivery failed
+    # *over the delivery that failed* is circular, and worse: each attempt burns
+    # another callback, so the notice crowds out the answer it is apologising
+    # for. Observed on the VM as a runaway loop — three user messages produced
+    # 24 sends, most of them delivery-failure notices about earlier
+    # delivery-failure notices.
+    "⚠️ Message delivery failed",
+    "⚠️ Your message was interrupted before processing started",
 )
 
 
@@ -365,7 +373,7 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
         self._send_seq += 1
 
         if self._is_transient_ack(content):
-            logger.info("[kakao] send dropped: transient status notice")
+            logger.warning("[kakao] send #%d dropped: transport meta-message", self._send_seq - 1)
             return SendResult(success=True)
 
         if not self._relay_token:

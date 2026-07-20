@@ -427,6 +427,11 @@ class TestTransientAckSuppression:
             "⏳ Subagent working — your message is queued.",
             "⏳ Compressing context — your message is queued.",
             "⏩ Steered into current run. Your message arrives after the next tool call.",
+            # Meta-messages about the transport. Sending these over the
+            # transport that just failed is circular and burns the callback the
+            # answer needs — on the VM it produced a runaway loop.
+            "⚠️ Message delivery failed after multiple attempts. Please try again.",
+            "⚠️ Your message was interrupted before processing started (likely by /stop).",
         ],
     )
     async def test_transient_notices_do_not_spend_the_callback(
