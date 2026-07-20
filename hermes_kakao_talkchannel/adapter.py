@@ -54,6 +54,27 @@ from .transport.sse import SSESessionInvalidatedError
 
 logger = logging.getLogger(__name__)
 
+#: Transient acknowledgements Hermes emits when a message arrives mid-run
+#: (``gateway/run.py``). They are informational and always followed by the real
+#: answer.
+#:
+#: KakaoTalk gives exactly **one single-use callback per inbound message**, so
+#: whichever send goes first consumes it and everything after fails with
+#: "Callback URL expired or not available". Observed on a live gateway
+#: 2026-07-20: sending a second message while a run was active delivered the
+#: ack and then lost the answer entirely.
+#:
+#: Spending that one callback on "I'll respond shortly" instead of the response
+#: is the wrong trade on this platform, so these are dropped. Set
+#: ``KAKAO_SEND_STATUS_NOTICES=1`` to send them anyway.
+_TRANSIENT_ACK_PREFIXES = (
+    "⚡ Interrupting current task",
+    "⏳ Queued for the next turn",
+    "⏳ Subagent working",
+    "⏳ Compressing context",
+    "⏩ Steered into current run",
+)
+
 
 class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
     """Bridges the KakaoTalk relay stream to the Hermes gateway."""
@@ -312,6 +333,10 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
         metadata: dict[str, Any] | None = None,
     ) -> Any:
         """Push a reply back through the relay."""
+        if self._is_transient_ack(content):
+            logger.debug("[kakao] Dropping transient status notice to preserve the callback")
+            return SendResult(success=True)
+
         if not self._relay_token:
             return SendResult(
                 success=False,
@@ -371,6 +396,24 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
             return kakao_override
 
         return build_simple_text_response(text)
+
+    @staticmethod
+    def _is_transient_ack(content: str) -> bool:
+        """Whether this is a mid-run status notice rather than an answer.
+
+        Reported as delivered without spending the callback. The alternative on
+        KakaoTalk is not "notice plus answer" — it is "notice instead of
+        answer", because the callback is single use.
+        """
+        if os.environ.get("KAKAO_SEND_STATUS_NOTICES", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            return False
+        stripped = (content or "").lstrip()
+        return any(stripped.startswith(prefix) for prefix in _TRANSIENT_ACK_PREFIXES)
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         """Chat metadata for the agent. Abstract on the real base class.

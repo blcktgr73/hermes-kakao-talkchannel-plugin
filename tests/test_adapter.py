@@ -263,6 +263,95 @@ async def test_session_invalidation_clears_the_token(adapter: KakaoAdapter) -> N
     assert adapter.kakao_config.session_token is None
 
 
+class TestTransientAckSuppression:
+    """KakaoTalk gives one single-use callback per inbound message.
+
+    Observed on a live gateway 2026-07-20: a second message arriving mid-run
+    made Hermes emit "⚡ Interrupting current task", that ack consumed the
+    callback, and the actual answer then failed with "Callback URL expired or
+    not available". On this platform the choice is not "notice and answer" but
+    "notice instead of answer".
+    """
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "⚡ Interrupting current task. I'll respond to your message shortly.",
+            "⏳ Queued for the next turn. I'll respond once the current task finishes.",
+            "⏳ Subagent working — your message is queued.",
+            "⏳ Compressing context — your message is queued.",
+            "⏩ Steered into current run. Your message arrives after the next tool call.",
+        ],
+    )
+    async def test_transient_notices_do_not_spend_the_callback(
+        self, adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch, content: str
+    ) -> None:
+        sent: list[str] = []
+
+        async def fake_send_reply(config: Any, message_id: str, response: Any) -> Any:
+            sent.append(message_id)
+            return SendReplyResponse(success=True)
+
+        monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", fake_send_reply)
+        adapter._last_message_id["u"] = "m"
+
+        result = await adapter.send("u", content)
+
+        # Reported as delivered so the core does not retry, but nothing is sent.
+        assert result.success is True
+        assert sent == []
+
+    async def test_a_real_answer_still_sends(
+        self, adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[str] = []
+
+        async def fake_send_reply(config: Any, message_id: str, response: Any) -> Any:
+            sent.append(message_id)
+            return SendReplyResponse(success=True)
+
+        monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", fake_send_reply)
+        adapter._last_message_id["u"] = "m"
+
+        await adapter.send("u", "pong 01")
+
+        assert sent == ["m"]
+
+    async def test_an_answer_merely_mentioning_a_prefix_still_sends(
+        self, adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Matching is anchored at the start, so ordinary prose is unaffected.
+        sent: list[str] = []
+
+        async def fake_send_reply(config: Any, message_id: str, response: Any) -> Any:
+            sent.append(message_id)
+            return SendReplyResponse(success=True)
+
+        monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", fake_send_reply)
+        adapter._last_message_id["u"] = "m"
+
+        await adapter.send("u", "The bot said ⚡ Interrupting current task earlier.")
+
+        assert sent == ["m"]
+
+    async def test_opt_in_restores_the_notices(
+        self, adapter: KakaoAdapter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[str] = []
+
+        async def fake_send_reply(config: Any, message_id: str, response: Any) -> Any:
+            sent.append(message_id)
+            return SendReplyResponse(success=True)
+
+        monkeypatch.setattr("hermes_kakao_talkchannel.adapter.send_reply", fake_send_reply)
+        monkeypatch.setenv("KAKAO_SEND_STATUS_NOTICES", "1")
+        adapter._last_message_id["u"] = "m"
+
+        await adapter.send("u", "⚡ Interrupting current task. I'll respond shortly.")
+
+        assert sent == ["m"]
+
+
 async def test_get_chat_info_reports_a_dm(adapter: KakaoAdapter) -> None:
     # Abstract on the real base class (verified against hermes-agent 0.18.2).
     # A KakaoTalk Channel conversation is always 1:1.
