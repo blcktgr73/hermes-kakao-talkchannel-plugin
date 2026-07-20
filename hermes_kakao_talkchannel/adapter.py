@@ -348,12 +348,13 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
         metadata: dict[str, Any] | None = None,
     ) -> Any:
         """Push a reply back through the relay."""
-        # Deliberately INFO, not DEBUG. KakaoTalk allows one reply per inbound
-        # message, so "how many times did the core call send for one turn, and
-        # with what" is the single most important thing to be able to see. It
-        # is not answerable from the gateway's own logs.
-        preview = (content or "").replace("\n", " ")[:60]
-        logger.info(
+        # WARNING, not INFO, on purpose while bringing this up: the host filters
+        # plugin INFO, and "how many times did the core call send for one turn,
+        # and with what" is the one question the gateway's own logs cannot
+        # answer — they show failed deliveries, not the calls that caused them.
+        # Drop to INFO once the outbound shape is settled.
+        preview = (content or "").replace("\n", " ")[:80]
+        logger.warning(
             "[kakao] send #%d chat=%s len=%d reply_to=%s preview=%r",
             self._send_seq,
             chat_id,
