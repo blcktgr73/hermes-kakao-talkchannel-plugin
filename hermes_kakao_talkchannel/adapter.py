@@ -396,13 +396,13 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
         metadata: dict[str, Any] | None = None,
     ) -> Any:
         """Push a reply back through the relay."""
-        # WARNING, not INFO, on purpose while bringing this up: the host filters
-        # plugin INFO, and "how many times did the core call send for one turn,
-        # and with what" is the one question the gateway's own logs cannot
-        # answer — they show failed deliveries, not the calls that caused them.
-        # Drop to INFO once the outbound shape is settled.
+        # Kept because it is the one view of "how many times did the core call
+        # send for one turn, and with what" — the gateway's own logs show failed
+        # deliveries, not the calls behind them. Raise to WARNING temporarily if
+        # the outbound shape ever needs investigating again; the host filters
+        # plugin INFO by default.
         preview = (content or "").replace("\n", " ")[:80]
-        logger.warning(
+        logger.info(
             "[kakao] send #%d chat=%s len=%d reply_to=%s preview=%r",
             self._send_seq,
             chat_id,
@@ -413,7 +413,7 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
         self._send_seq += 1
 
         if self._is_transient_ack(content):
-            logger.warning("[kakao] send #%d dropped: transport meta-message", self._send_seq - 1)
+            logger.info("[kakao] send #%d dropped: transport meta-message", self._send_seq - 1)
             return SendResult(success=True)
 
         if not self._relay_token:
