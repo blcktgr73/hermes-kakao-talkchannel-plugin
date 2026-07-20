@@ -154,9 +154,8 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
         self._send_seq = 0
         #: Buffered outbound blocks per chat, flushed as one reply.
         self._outbox: dict[str, _Outbox] = defaultdict(_Outbox)
-        #: Inbound counters, so one turn's fan-out can be attributed.
-        self._inbound_seq = 0
-        self._seen_message_ids: deque[str] = deque(maxlen=200)
+        #: Relay message ids already handled, so a replay cannot start a turn.
+        self._seen_message_ids: deque[str] = deque(maxlen=500)
 
         self._account_id = self.kakao_config.channel_id or "default"
         # Supervisor state for re-issuing a pairing code without restarting the
@@ -338,24 +337,16 @@ class KakaoAdapter(BasePlatformAdapter):  # type: ignore[misc,valid-type]
             logger.info("[kakao] Ignoring message from unauthorized user %s", user_id)
             return
 
-        # Counterpart to the send log. One inbound should produce one turn; if
-        # the same relay message id appears twice the multiplication is upstream
-        # of the agent, not in it.
-        self._inbound_seq += 1
+        # One relay message must start at most one turn.
+        #
+        # The relay re-flushes queued messages on every SSE subscribe, so any
+        # reconnect replays whatever it still considers undelivered. That is
+        # upstream of us and cannot be relied on not to happen, so the guard
+        # lives here: on a live gateway a single message was replayed 94 times
+        # in one second and started 94 agent turns.
         if message.id in self._seen_message_ids:
-            logger.warning(
-                "[kakao] inbound #%d DUPLICATE id=%s text=%r — already handled",
-                self._inbound_seq,
-                message.id,
-                message.normalized.text[:40],
-            )
-        else:
-            logger.warning(
-                "[kakao] inbound #%d id=%s text=%r",
-                self._inbound_seq,
-                message.id,
-                message.normalized.text[:40],
-            )
+            logger.debug("[kakao] Ignoring replayed message %s", message.id)
+            return
         self._seen_message_ids.append(message.id)
 
         self._pending_message_ids[user_id].append((message.id, time.time()))

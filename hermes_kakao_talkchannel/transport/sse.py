@@ -26,6 +26,14 @@ DEFAULT_RECONNECT_DELAY_MS = 1000
 DEFAULT_MAX_RECONNECT_DELAY_MS = 30000
 DEFAULT_TIMEOUT_MS = 300000  # 5 minutes, per connection attempt
 
+#: Pause before reconnecting after the server closes the stream cleanly.
+#:
+#: Without it a server that closes immediately produces an unthrottled
+#: reconnect loop. That is not hypothetical: it ran at ~94 reconnects per
+#: second on a live gateway, and because the relay re-flushes queued messages
+#: on every subscribe, a single inbound message was delivered 94 times.
+CLEAN_CLOSE_RECONNECT_DELAY_SECONDS = 1.0
+
 
 @dataclass
 class _EventCursor:
@@ -186,10 +194,23 @@ async def connect_sse(
                 if handlers.on_connected:
                     handlers.on_connected()
 
-                await _read_stream(response, handlers, stop_event, cursor)
-                # Both a pairing-triggered break and a clean close reconnect
-                # immediately, with no backoff and no attempt increment.
+                reconnect_for_pairing = await _read_stream(
+                    response, handlers, stop_event, cursor
+                )
+
+            # A pairing-triggered break reconnects at once, on purpose: the new
+            # stream must subscribe to the freshly paired account.
+            if reconnect_for_pairing:
                 continue
+
+            # A clean close does NOT. Reconnecting with no delay turns a server
+            # that closes immediately into a tight loop — observed on a live
+            # gateway at ~94 reconnects per second, and because the relay
+            # re-flushes queued messages on every subscribe, one user message
+            # was delivered 94 times and started 94 agent turns. The TypeScript
+            # original has the same hole.
+            await _sleep(CLEAN_CLOSE_RECONNECT_DELAY_SECONDS, stop_event)
+            continue
 
         except SSESessionInvalidatedError as error:
             if stop_event.is_set():
